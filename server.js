@@ -712,6 +712,42 @@ io.on("connection", (socket) => {
     broadcastChannelUpdate(channelId);
   });
 
+  // Update game settings in real-time (before game starts)
+  socket.on("update-game-settings", ({ channelId, settings }) => {
+    const device = connectedDevices.get(persistentDeviceId);
+
+    if (!device || device.channel !== channelId) {
+      console.warn(`Device ${persistentDeviceId} tried to update settings but is not in channel ${channelId}`);
+      return;
+    }
+
+    const channel = channels.get(channelId);
+    if (!channel) {
+      console.warn(`Channel ${channelId} not found`);
+      return;
+    }
+
+    if (channel.adminId !== persistentDeviceId) {
+      console.warn(`Non-admin ${persistentDeviceId} tried to update game settings`);
+      return;
+    }
+
+    if (channel.isGameStarted) {
+      console.warn(`Cannot update settings after game started in channel ${channelId}`);
+      return;
+    }
+
+    // Validate and update settings
+    if (settings && validateGameSettings(settings)) {
+      channel.gameSettings = settings;
+      console.log(`[${new Date().toISOString()}] Game settings updated for channel ${channelId}:`, settings);
+      // Broadcast updated settings to all clients in the channel
+      broadcastChannelUpdate(channelId);
+    } else {
+      console.warn(`[${new Date().toISOString()}] Invalid game settings provided:`, settings);
+    }
+  });
+
   socket.on("load-questions", (payload) => {
     const { channelId, questions } = payload;
     const device = connectedDevices.get(persistentDeviceId);
