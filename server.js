@@ -39,6 +39,7 @@ const buildDevicePayload = (device) => ({
   role: device.role || "guest",
   displayName: device.displayName || device.id,
   isReady: Boolean(device.isReady),
+  locale: device.locale || "pt-BR",
 });
 
 const sanitizeCategoryName = (name) => {
@@ -101,11 +102,91 @@ const getChannelState = (channelId) => {
     maxCategorySelections: MAX_CATEGORY_SELECTIONS,
     isVotingClosed: Boolean(channel?.isVotingClosed),
     isGameStarted: Boolean(channel?.isGameStarted),
+    gameState: channel?.gameState
+      ? {
+          questions: channel.gameState.questions.map((q) => ({
+            id: q.id,
+            question: q.question,
+            options: q.options,
+            difficulty: q.difficulty,
+            points: q.points,
+            category: q.category,
+            correctAnswer: q.correctAnswer,
+          })),
+          currentQuestionIndex: channel.gameState.currentQuestionIndex,
+          timerRemaining: channel.gameState.timerRemaining,
+          isShowingResults: channel.gameState.isShowingResults,
+        }
+      : null,
   };
 };
 
 const broadcastChannelUpdate = (channelId) => {
-  io.to(channelId).emit("channel-update", getChannelState(channelId));
+  const channel = channels.get(channelId);
+  if (!channel) return;
+
+  // If multilingual questions exist, send personalized updates to each device
+  if (channel.gameState?.questionsByLocale) {
+    console.log(`[${new Date().toISOString()}] Broadcasting multilingual questions to channel ${channelId}`);
+    const devices = Array.from(channel.devices || []);
+    devices.forEach((deviceId) => {
+      const device = connectedDevices.get(deviceId);
+      if (device && device.socketId) {
+        const deviceLocale = device.locale || "pt-BR";
+        console.log(`  - Sending ${deviceLocale} questions to device ${deviceId}`);
+        const personalizedState = getChannelStateForLocale(channelId, deviceLocale);
+        const socket = io.sockets.sockets.get(device.socketId);
+        if (socket) {
+          socket.emit("channel-update", personalizedState);
+        }
+      }
+    });
+  } else {
+    // Legacy: broadcast same state to all
+    console.log(`[${new Date().toISOString()}] Broadcasting same state to all devices in channel ${channelId}`);
+    io.to(channelId).emit("channel-update", getChannelState(channelId));
+  }
+};
+
+const getChannelStateForLocale = (channelId, locale) => {
+  const channel = channels.get(channelId);
+  if (!channel) {
+    return null;
+  }
+
+  const devices = getChannelDevices(channelId);
+  const categoryTotals = getCategoryTotals(channelId);
+
+  // Get questions for the specific locale
+  const questionsForLocale =
+    channel.gameState?.questionsByLocale?.[locale] || channel.gameState?.questions || [];
+
+  return {
+    channelId,
+    devices,
+    totalDevices: devices.length,
+    adminId: channel.adminId,
+    categoryTotals,
+    maxCategorySelections: MAX_CATEGORY_SELECTIONS,
+    isVotingClosed: Boolean(channel?.isVotingClosed),
+    isGameStarted: Boolean(channel?.isGameStarted),
+    gameState: channel?.gameState
+      ? {
+          questions: questionsForLocale.map((q) => ({
+            id: q.id,
+            question: q.question,
+            options: q.options,
+            difficulty: q.difficulty,
+            points: q.points,
+            category: q.category,
+            correctAnswer: q.correctAnswer,
+          })),
+          currentQuestionIndex: channel.gameState.currentQuestionIndex,
+          timerRemaining: channel.gameState.timerRemaining,
+          isShowingResults: channel.gameState.isShowingResults,
+        }
+      : null,
+  };
 };
 
 const removeDeviceFromChannel = (deviceId, reason, options = {}) => {
@@ -156,6 +237,12 @@ const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
   console.log(
     `[${new Date().toISOString()}] Force closing channel ${channelId} (reason: ${reason})`
   );
+
+  // Limpar timer do jogo se existir
+  if (channel.gameState?.timerInterval) {
+    clearInterval(channel.gameState.timerInterval);
+  }
+
   const members = Array.from(channel.devices);
 
   members.forEach((deviceId) => {
@@ -166,11 +253,92 @@ const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
   channels.delete(channelId);
 };
 
-io.on("connection", (socket) => {
-  const persistentDeviceId = socket.handshake.auth.deviceId || socket.id;
+const startQuestionTimer = (channelId) => {
+  const channel = channels.get(channelId);
+  if (!channel || !channel.gameState) return;
+
+  // Limpar timer anterior se existir
+  if (channel.gameState.timerInterval) {
+    clearInterval(channel.gameState.timerInterval);
+  }
+
+  // Timer de 1 segundo
+  channel.gameState.timerInterval = setInterval(() => {
+    if (!channels.has(channelId)) {
+      clearInterval(channel.gameState.timerInterval);
+      return;
+    }
+
+    const currentChannel = channels.get(channelId);
+    if (currentChannel.gameState.timerRemaining > 0) {
+      currentChannel.gameState.timerRemaining--;
+      broadcastChannelUpdate(channelId);
+    } else {
+      // Timer expirou
+      clearInterval(currentChannel.gameState.timerInterval);
+      currentChannel.gameState.timerInterval = null;
+
+      // Emitir evento de timeout
+      io.to(channelId).emit("question-timeout", {
+        questionIndex: currentChannel.gameState.currentQuestionIndex,
+      });
+    }
+  }, 1000);
+};
+
+const calculateRanking = (channel) => {
+  const ranking = [];
 
   console.log(
-    `[${new Date().toISOString()}] Device connected: ${persistentDeviceId} (socket: ${socket.id})`
+    `[${new Date().toISOString()}] Calculating ranking for ${channel.gameState.answers.size} devices`
+  );
+
+  channel.gameState.answers.forEach((answers, deviceId) => {
+    const device = connectedDevices.get(deviceId);
+    if (!device) {
+      console.warn(`Device ${deviceId} not found in connectedDevices`);
+      return;
+    }
+
+    const totalPoints = answers.reduce((sum, a) => sum + a.points, 0);
+    const correctAnswers = answers.filter((a) => a.isCorrect).length;
+    const totalAnswers = answers.length;
+    const accuracy = totalAnswers > 0 ? (correctAnswers / totalAnswers) * 100 : 0;
+
+    console.log(
+      `  ${device.displayName} (${device.role}): ${totalPoints} pts, ${correctAnswers}/${totalAnswers} correct`
+    );
+
+    ranking.push({
+      deviceId,
+      displayName: device.displayName,
+      role: device.role,
+      totalPoints,
+      correctAnswers,
+      totalAnswers,
+      accuracy: Math.round(accuracy),
+    });
+  });
+
+  // Ordenar por pontos (maior para menor)
+  ranking.sort((a, b) => b.totalPoints - a.totalPoints);
+
+  // Adicionar posição
+  ranking.forEach((entry, index) => {
+    entry.position = index + 1;
+  });
+
+  console.log(`[${new Date().toISOString()}] Final ranking:`, JSON.stringify(ranking, null, 2));
+
+  return ranking;
+};
+
+io.on("connection", (socket) => {
+  const persistentDeviceId = socket.handshake.auth.deviceId || socket.id;
+  const deviceLocale = socket.handshake.auth.locale || "pt-BR";
+
+  console.log(
+    `[${new Date().toISOString()}] Device connected: ${persistentDeviceId} (socket: ${socket.id}, locale: ${deviceLocale})`
   );
 
   socketToDevice.set(socket.id, persistentDeviceId);
@@ -184,6 +352,7 @@ io.on("connection", (socket) => {
     role: "guest",
     displayName: null,
     isReady: false,
+    locale: deviceLocale,
   });
 
   socket.on("create-channel", (channelId, deviceId, options = {}) => {
@@ -220,6 +389,15 @@ io.on("connection", (socket) => {
       votes: new Map(),
       isVotingClosed: false,
       isGameStarted: false,
+      gameState: {
+        questions: [],
+        currentQuestionIndex: 0,
+        questionStartTime: null,
+        timerRemaining: 60,
+        timerInterval: null,
+        answers: new Map(),
+        isShowingResults: false,
+      },
     };
     channels.set(channelId, channel);
 
@@ -235,7 +413,8 @@ io.on("connection", (socket) => {
       `[${new Date().toISOString()}] Channel ${channelId} created with admin ${actualDeviceId}`
     );
 
-    socket.emit("joined-channel", getChannelState(channelId));
+    const deviceLocale = device.locale || "pt-BR";
+    socket.emit("joined-channel", getChannelStateForLocale(channelId, deviceLocale));
   });
 
   socket.on("join-channel", (channelId, deviceId, options = {}) => {
@@ -284,7 +463,8 @@ io.on("connection", (socket) => {
 
     broadcastChannelUpdate(channelId);
 
-    socket.emit("joined-channel", getChannelState(channelId));
+    const deviceLocale = device.locale || "pt-BR";
+    socket.emit("joined-channel", getChannelStateForLocale(channelId, deviceLocale));
   });
 
   socket.on("leave-channel", (channelId) => {
@@ -367,7 +547,12 @@ io.on("connection", (socket) => {
   });
 
   socket.on("update-ready-state", ({ channelId, isReady }) => {
+    console.log(
+      `[${new Date().toISOString()}] Device ${persistentDeviceId} updating ready state to ${isReady} in channel ${channelId}`
+    );
+
     if (!channelId) {
+      console.warn(`[${new Date().toISOString()}] No channelId provided`);
       return;
     }
 
@@ -375,14 +560,21 @@ io.on("connection", (socket) => {
     const channel = channels.get(channelId);
 
     if (!device || !channel || device.channel !== channelId) {
+      console.warn(
+        `[${new Date().toISOString()}] Invalid device or channel state for ${persistentDeviceId}`
+      );
       return;
     }
 
     if (channel.isGameStarted) {
+      console.warn(`[${new Date().toISOString()}] Game already started, cannot update ready state`);
       return;
     }
 
     device.isReady = Boolean(isReady);
+    console.log(
+      `[${new Date().toISOString()}] Device ${persistentDeviceId} (${device.displayName}) is now ${device.isReady ? "READY" : "NOT READY"}`
+    );
     broadcastChannelUpdate(channelId);
   });
 
@@ -458,6 +650,238 @@ io.on("connection", (socket) => {
     broadcastChannelUpdate(channelId);
   });
 
+  socket.on("load-questions", (payload) => {
+    const { channelId, questions } = payload;
+    const device = connectedDevices.get(persistentDeviceId);
+
+    if (!device || device.channel !== channelId) {
+      return;
+    }
+
+    const channel = channels.get(channelId);
+    if (!channel || channel.adminId !== persistentDeviceId) {
+      console.warn(`Non-admin tried to load questions: ${persistentDeviceId}`);
+      return;
+    }
+
+    if (!channel.isGameStarted) {
+      console.warn(`Game not started yet`);
+      return;
+    }
+
+    // Check if questions is multilingual (object with locale keys) or single locale array
+    const isMultilingual =
+      typeof questions === "object" &&
+      !Array.isArray(questions) &&
+      questions["pt-BR"] !== undefined;
+
+    if (isMultilingual) {
+      // Store multilingual questions
+      channel.gameState.questionsByLocale = questions;
+      // Use pt-BR as default for validation
+      channel.gameState.questions = questions["pt-BR"];
+      console.log(
+        `Multilingual questions loaded for channel ${channelId}: ${questions["pt-BR"].length} questions`
+      );
+    } else {
+      // Legacy: single locale questions
+      channel.gameState.questions = questions;
+      console.log(`Questions loaded for channel ${channelId}: ${questions.length} questions`);
+    }
+
+    channel.gameState.currentQuestionIndex = 0;
+    channel.gameState.questionStartTime = Date.now();
+    channel.gameState.timerRemaining = 60;
+
+    // Iniciar timer sincronizado
+    startQuestionTimer(channelId);
+
+    // Broadcast estado atualizado
+    broadcastChannelUpdate(channelId);
+  });
+
+  socket.on("submit-answer", (payload) => {
+    const { channelId, questionIndex, answerIndex, timeSpent } = payload;
+    const device = connectedDevices.get(persistentDeviceId);
+
+    if (!device || device.channel !== channelId) {
+      return;
+    }
+
+    const channel = channels.get(channelId);
+    if (!channel || !channel.isGameStarted) {
+      return;
+    }
+
+    // Verificar se é a pergunta atual
+    if (questionIndex !== channel.gameState.currentQuestionIndex) {
+      console.warn(`Device ${persistentDeviceId} answered wrong question`);
+      return;
+    }
+
+    // Verificar se já respondeu esta pergunta
+    const deviceAnswers = channel.gameState.answers.get(persistentDeviceId) || [];
+    const alreadyAnswered = deviceAnswers.some((a) => a.questionIndex === questionIndex);
+
+    if (alreadyAnswered) {
+      console.warn(
+        `Device ${persistentDeviceId} already answered question ${questionIndex}`
+      );
+      return;
+    }
+
+    // Obter pergunta e verificar resposta
+    const question = channel.gameState.questions[questionIndex];
+    const isCorrect = answerIndex === question.correctAnswer;
+
+    // Salvar resposta
+    const answerData = {
+      questionIndex,
+      answerIndex,
+      timeSpent,
+      isCorrect,
+      points: isCorrect ? question.points : 0,
+      timestamp: Date.now(),
+    };
+
+    if (!channel.gameState.answers.has(persistentDeviceId)) {
+      channel.gameState.answers.set(persistentDeviceId, []);
+    }
+    channel.gameState.answers.get(persistentDeviceId).push(answerData);
+
+    console.log(
+      `[${new Date().toISOString()}] Device ${device.displayName} (${device.role}) answered Q${questionIndex}: ${
+        isCorrect ? "CORRECT" : "WRONG"
+      } (+${answerData.points} pts)`
+    );
+
+    // Notificar TODOS os dispositivos do canal sobre o resultado (para sincronizar feedback)
+    io.to(channelId).emit("answer-result", {
+      questionIndex,
+      isCorrect,
+      points: answerData.points,
+      deviceId: persistentDeviceId,
+    });
+  });
+
+  socket.on("next-question", (payload) => {
+    const { channelId } = payload;
+    const device = connectedDevices.get(persistentDeviceId);
+
+    if (!device || device.channel !== channelId) {
+      return;
+    }
+
+    const channel = channels.get(channelId);
+    if (!channel || channel.adminId !== persistentDeviceId) {
+      console.warn(`Non-admin tried to advance question`);
+      return;
+    }
+
+    if (!channel.isGameStarted) {
+      return;
+    }
+
+    // Limpar timer atual
+    if (channel.gameState.timerInterval) {
+      clearInterval(channel.gameState.timerInterval);
+      channel.gameState.timerInterval = null;
+    }
+
+    // Avançar para próxima pergunta
+    channel.gameState.currentQuestionIndex++;
+
+    // Verificar se acabaram as perguntas
+    if (
+      channel.gameState.currentQuestionIndex >= channel.gameState.questions.length
+    ) {
+      // Jogo terminou - mostrar resultados
+      channel.gameState.isShowingResults = true;
+
+      // Calcular ranking
+      const ranking = calculateRanking(channel);
+
+      // Emitir resultados
+      io.to(channelId).emit("game-finished", {
+        ranking,
+        totalQuestions: channel.gameState.questions.length,
+      });
+
+      console.log(`Game finished in channel ${channelId}`);
+    } else {
+      // Próxima pergunta
+      channel.gameState.questionStartTime = Date.now();
+      channel.gameState.timerRemaining = 60;
+
+      // Reiniciar timer
+      startQuestionTimer(channelId);
+
+      console.log(
+        `Channel ${channelId} advanced to question ${
+          channel.gameState.currentQuestionIndex + 1
+        }`
+      );
+    }
+
+    // Broadcast estado atualizado
+    broadcastChannelUpdate(channelId);
+  });
+
+  socket.on("reset-game", ({ channelId }) => {
+    if (!channelId) {
+      return;
+    }
+    const requester = connectedDevices.get(persistentDeviceId);
+    const channel = channels.get(channelId);
+
+    if (!requester || !channel || requester.channel !== channelId) {
+      return;
+    }
+
+    if (channel.adminId !== persistentDeviceId) {
+      console.warn(
+        `[${new Date().toISOString()}] Device ${persistentDeviceId} tried to reset game without admin role`
+      );
+      return;
+    }
+
+    console.log(
+      `[${new Date().toISOString()}] Admin ${persistentDeviceId} reset game in channel ${channelId}`
+    );
+
+    // Limpar timer se existir
+    if (channel.gameState?.timerInterval) {
+      clearInterval(channel.gameState.timerInterval);
+    }
+
+    // Reset game state but keep categories and ready states
+    channel.isGameStarted = false;
+
+    // Resetar estado do jogo
+    channel.gameState = {
+      questions: [],
+      currentQuestionIndex: 0,
+      questionStartTime: null,
+      timerRemaining: 60,
+      timerInterval: null,
+      answers: new Map(),
+      isShowingResults: false,
+    };
+
+    // Reset all guests ready state to false so they can prepare again
+    Array.from(channel.devices || []).forEach((deviceId) => {
+      const device = connectedDevices.get(deviceId);
+      if (device && device.role === "guest") {
+        device.isReady = false;
+      }
+    });
+
+    // Notify all devices in the channel to return to lobby
+    io.to(channelId).emit("game-reset", { channelId });
+
+    broadcastChannelUpdate(channelId);
+  });
+
   socket.on("remove-device", ({ channelId, targetDeviceId }) => {
     if (!channelId || !targetDeviceId) {
       return;
@@ -492,6 +916,20 @@ io.on("connection", (socket) => {
 
   socket.on("ping", () => {
     socket.emit("pong", { timestamp: Date.now() });
+  });
+
+  socket.on("update-locale", (payload) => {
+    const { locale } = payload;
+    const device = connectedDevices.get(persistentDeviceId);
+    if (device && locale) {
+      device.locale = locale;
+      console.log(`[${new Date().toISOString()}] Device ${persistentDeviceId} updated locale to ${locale}`);
+
+      // Broadcast channel update if device is in a channel
+      if (device.channel) {
+        broadcastChannelUpdate(device.channel);
+      }
+    }
   });
 
   socket.on("disconnect", () => {
