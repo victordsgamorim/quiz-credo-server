@@ -26,9 +26,53 @@ const io = new Server(httpServer, {
 
 const MAX_CATEGORY_SELECTIONS = 5;
 
-const channels = new Map(); // channelId -> { adminId: string, devices: Set<string>, votes: Map<string, Set<string>>, isVotingClosed: boolean }
+const channels = new Map(); // channelId -> { adminId: string, devices: Set<string>, votes: Map<string, Set<string>>, isVotingClosed: boolean, gameSettings: GameSettings }
 const connectedDevices = new Map(); // deviceId -> device info
 const socketToDevice = new Map();
+
+/**
+ * Validates game settings object
+ */
+const validateGameSettings = (settings) => {
+  if (!settings || typeof settings !== "object") {
+    return false;
+  }
+
+  const limits = {
+    questionCount: { min: 10, max: 50 },
+    timerDuration: { min: 60, max: 300 },
+    maxCategorySelections: { min: 3, max: 10 },
+    topCategoriesCount: { min: 5, max: 15 },
+    lowTimeThreshold: { min: 5, max: 20 },
+    criticalTimeThreshold: { min: 3, max: 10 },
+  };
+
+  // Validate timerDuration (can be null)
+  if (settings.timerDuration !== null && typeof settings.timerDuration !== "number") {
+    return false;
+  }
+
+  if (
+    settings.timerDuration !== null &&
+    (settings.timerDuration < limits.timerDuration.min ||
+      settings.timerDuration > limits.timerDuration.max)
+  ) {
+    return false;
+  }
+
+  // Validate other numeric fields
+  for (const [key, limit] of Object.entries(limits)) {
+    if (key === "timerDuration") continue; // Already validated
+
+    const value = settings[key];
+    if (typeof value !== "number" || value < limit.min || value > limit.max) {
+      console.warn(`Invalid game setting ${key}: ${value} (expected ${limit.min}-${limit.max})`);
+      return false;
+    }
+  }
+
+  return true;
+};
 
 const buildDevicePayload = (device) => ({
   id: device.id,
@@ -99,7 +143,8 @@ const getChannelState = (channelId) => {
     totalDevices: devices.length,
     adminId: channel?.adminId || null,
     categoryTotals,
-    maxCategorySelections: MAX_CATEGORY_SELECTIONS,
+    maxCategorySelections: channel?.gameSettings?.maxCategorySelections || MAX_CATEGORY_SELECTIONS,
+    gameSettings: channel?.gameSettings || null,
     isVotingClosed: Boolean(channel?.isVotingClosed),
     isGameStarted: Boolean(channel?.isGameStarted),
     gameState: channel?.gameState
@@ -167,7 +212,8 @@ const getChannelStateForLocale = (channelId, locale) => {
     totalDevices: devices.length,
     adminId: channel.adminId,
     categoryTotals,
-    maxCategorySelections: MAX_CATEGORY_SELECTIONS,
+    maxCategorySelections: channel.gameSettings?.maxCategorySelections || MAX_CATEGORY_SELECTIONS,
+    gameSettings: channel.gameSettings || null,
     isVotingClosed: Boolean(channel?.isVotingClosed),
     isGameStarted: Boolean(channel?.isGameStarted),
     gameState: channel?.gameState
@@ -260,6 +306,13 @@ const startQuestionTimer = (channelId) => {
   // Limpar timer anterior se existir
   if (channel.gameState.timerInterval) {
     clearInterval(channel.gameState.timerInterval);
+  }
+
+  // Se timerDuration é null, não iniciar timer (sem limite de tempo)
+  const timerDuration = channel.gameSettings?.timerDuration;
+  if (timerDuration === null) {
+    console.log(`[${new Date().toISOString()}] No timer for channel ${channelId} (unlimited time)`);
+    return;
   }
 
   // Timer de 1 segundo
@@ -611,7 +664,7 @@ io.on("connection", (socket) => {
     broadcastChannelUpdate(channelId);
   });
 
-  socket.on("start-game", ({ channelId }) => {
+  socket.on("start-game", ({ channelId, settings }) => {
     if (!channelId) {
       return;
     }
@@ -643,6 +696,15 @@ io.on("connection", (socket) => {
         `[${new Date().toISOString()}] Admin ${persistentDeviceId} tried to start game but not all guests are ready`
       );
       return;
+    }
+
+    // Validate and store game settings
+    if (settings && validateGameSettings(settings)) {
+      channel.gameSettings = settings;
+      console.log(`[${new Date().toISOString()}] Game settings configured for channel ${channelId}:`, settings);
+    } else if (settings) {
+      console.warn(`[${new Date().toISOString()}] Invalid game settings provided, using defaults`);
+      channel.gameSettings = null;
     }
 
     channel.isGameStarted = true;
@@ -691,7 +753,7 @@ io.on("connection", (socket) => {
 
     channel.gameState.currentQuestionIndex = 0;
     channel.gameState.questionStartTime = Date.now();
-    channel.gameState.timerRemaining = 60;
+    channel.gameState.timerRemaining = channel.gameSettings?.timerDuration || 60;
 
     // Iniciar timer sincronizado
     startQuestionTimer(channelId);
@@ -811,7 +873,7 @@ io.on("connection", (socket) => {
     } else {
       // Próxima pergunta
       channel.gameState.questionStartTime = Date.now();
-      channel.gameState.timerRemaining = 60;
+      channel.gameState.timerRemaining = channel.gameSettings?.timerDuration || 60;
 
       // Reiniciar timer
       startQuestionTimer(channelId);
