@@ -86,6 +86,32 @@ const buildDevicePayload = (device) => ({
   locale: device.locale || "pt-BR",
 });
 
+const getAnsweredGuestsCount = (channel, questionIndex) => {
+  if (!channel || !channel.gameState || !channel.gameState.answers) {
+    return { answeredCount: 0, totalGuests: 0 };
+  }
+
+  let answeredCount = 0;
+  let totalGuests = 0;
+
+  // Contar total de guests no canal
+  Array.from(channel.devices || []).forEach((deviceId) => {
+    const device = connectedDevices.get(deviceId);
+    if (device && device.role === "guest") {
+      totalGuests++;
+
+      // Verificar se este guest respondeu a pergunta atual
+      const deviceAnswers = channel.gameState.answers.get(deviceId) || [];
+      const hasAnswered = deviceAnswers.some((a) => a.questionIndex === questionIndex);
+      if (hasAnswered) {
+        answeredCount++;
+      }
+    }
+  });
+
+  return { answeredCount, totalGuests };
+};
+
 const sanitizeCategoryName = (name) => {
   if (typeof name !== "string") {
     return "";
@@ -137,6 +163,12 @@ const getChannelState = (channelId) => {
   const channel = channels.get(channelId);
   const categoryTotals = getCategoryTotals(channelId).slice(0, 10);
 
+  const answerStats = channel?.gameState
+    ? getAnsweredGuestsCount(channel, channel.gameState.currentQuestionIndex)
+    : { answeredCount: 0, totalGuests: 0 };
+
+  const selectedGuestsCount = channel?.gameState?.guestSelections?.size || 0;
+
   return {
     channelId,
     devices,
@@ -161,6 +193,9 @@ const getChannelState = (channelId) => {
           currentQuestionIndex: channel.gameState.currentQuestionIndex,
           timerRemaining: channel.gameState.timerRemaining,
           isShowingResults: channel.gameState.isShowingResults,
+          answeredGuestsCount: answerStats.answeredCount,
+          totalGuests: answerStats.totalGuests,
+          selectedGuestsCount,
         }
       : null,
   };
@@ -206,6 +241,12 @@ const getChannelStateForLocale = (channelId, locale) => {
   const questionsForLocale =
     channel.gameState?.questionsByLocale?.[locale] || channel.gameState?.questions || [];
 
+  const answerStats = channel?.gameState
+    ? getAnsweredGuestsCount(channel, channel.gameState.currentQuestionIndex)
+    : { answeredCount: 0, totalGuests: 0 };
+
+  const selectedGuestsCount = channel?.gameState?.guestSelections?.size || 0;
+
   return {
     channelId,
     devices,
@@ -230,6 +271,9 @@ const getChannelStateForLocale = (channelId, locale) => {
           currentQuestionIndex: channel.gameState.currentQuestionIndex,
           timerRemaining: channel.gameState.timerRemaining,
           isShowingResults: channel.gameState.isShowingResults,
+          answeredGuestsCount: answerStats.answeredCount,
+          totalGuests: answerStats.totalGuests,
+          selectedGuestsCount,
         }
       : null,
   };
@@ -790,6 +834,7 @@ io.on("connection", (socket) => {
     channel.gameState.currentQuestionIndex = 0;
     channel.gameState.questionStartTime = Date.now();
     channel.gameState.timerRemaining = channel.gameSettings?.timerDuration || 60;
+    channel.gameState.guestSelections = new Set();
 
     // Iniciar timer sincronizado
     startQuestionTimer(channelId);
@@ -853,6 +898,9 @@ io.on("connection", (socket) => {
       } (+${answerData.points} pts)`
     );
 
+    // Broadcast updated channel state to show answer count in real-time
+    broadcastChannelUpdate(channelId);
+
     // Notificar TODOS os dispositivos do canal sobre o resultado (para sincronizar feedback)
     io.to(channelId).emit("answer-result", {
       questionIndex,
@@ -860,6 +908,46 @@ io.on("connection", (socket) => {
       points: answerData.points,
       deviceId: persistentDeviceId,
     });
+  });
+
+  socket.on("guest-selected-answer", (payload) => {
+    const { channelId, questionIndex } = payload;
+    const device = connectedDevices.get(persistentDeviceId);
+
+    if (!device || device.channel !== channelId) {
+      return;
+    }
+
+    // Only guests should send this event
+    if (device.role !== "guest") {
+      return;
+    }
+
+    const channel = channels.get(channelId);
+    if (!channel || !channel.isGameStarted) {
+      return;
+    }
+
+    // Verificar se é a pergunta atual
+    if (questionIndex !== channel.gameState.currentQuestionIndex) {
+      return;
+    }
+
+    // Initialize selections set if it doesn't exist
+    if (!channel.gameState.guestSelections) {
+      channel.gameState.guestSelections = new Set();
+    }
+
+    // Add this guest to the set of guests who have selected an answer
+    // (Set automatically handles duplicates, so multiple selections don't count)
+    channel.gameState.guestSelections.add(persistentDeviceId);
+
+    console.log(
+      `[${new Date().toISOString()}] Guest ${device.displayName} selected an answer for Q${questionIndex} (${channel.gameState.guestSelections.size} guests selected)`
+    );
+
+    // Broadcast updated channel state
+    broadcastChannelUpdate(channelId);
   });
 
   socket.on("next-question", (payload) => {
@@ -888,6 +976,9 @@ io.on("connection", (socket) => {
 
     // Avançar para próxima pergunta
     channel.gameState.currentQuestionIndex++;
+
+    // Reset guest selections for the new question
+    channel.gameState.guestSelections = new Set();
 
     // Verificar se acabaram as perguntas
     if (
