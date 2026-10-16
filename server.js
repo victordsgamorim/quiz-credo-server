@@ -728,14 +728,21 @@ io.on("connection", (socket) => {
 
     const devices = getChannelDevices(channelId);
     const guestDevices = devices.filter((device) => device.role === "guest");
-    if (guestDevices.length === 0) {
+    // Debug mode lets the admin start and play alone, without guests
+    const isDebugMode = Boolean(settings?.enableDebugMode) && validateGameSettings(settings);
+    if (isDebugMode) {
+      console.log(
+        `[${new Date().toISOString()}] Admin ${persistentDeviceId} starting game in debug mode (guest checks skipped)`
+      );
+    }
+    if (!isDebugMode && guestDevices.length === 0) {
       console.warn(
         `[${new Date().toISOString()}] Admin ${persistentDeviceId} tried to start game without any guests`
       );
       return;
     }
     const allGuestsReady = guestDevices.every((device) => device.isReady);
-    if (!allGuestsReady) {
+    if (!isDebugMode && !allGuestsReady) {
       console.warn(
         `[${new Date().toISOString()}] Admin ${persistentDeviceId} tried to start game but not all guests are ready`
       );
