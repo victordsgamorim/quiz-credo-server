@@ -648,6 +648,8 @@ const removeDeviceFromChannel = (deviceId, reason, options = {}) => {
   }
 };
 
+const ADMIN_RECONNECT_GRACE_MS = 30000;
+
 const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
   const channel = channels.get(channelId);
   if (!channel) {
@@ -657,6 +659,8 @@ const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
   console.log(
     `[${new Date().toISOString()}] Force closing channel ${channelId} (reason: ${reason})`
   );
+
+  clearTimeout(channel.adminGraceTimer);
 
   // Limpar timer do jogo se existir
   if (channel.gameState?.timerInterval) {
@@ -876,6 +880,10 @@ io.on("connection", (socket) => {
     channel.votes = channel.votes || new Map();
     channel.isVotingClosed = Boolean(channel.isVotingClosed);
     channel.isGameStarted = Boolean(channel.isGameStarted);
+
+    if (channel.adminId === actualDeviceId) {
+      clearTimeout(channel.adminGraceTimer);
+    }
 
     channel.devices.add(actualDeviceId);
     device.channel = channelId;
@@ -1539,7 +1547,16 @@ io.on("connection", (socket) => {
       if (device.channel) {
         const channel = channels.get(device.channel);
         if (channel && channel.adminId === persistentDeviceId) {
-          forceCloseChannel(device.channel, "admin_disconnected");
+          // A reload drops the socket for a moment: give the admin time to come back
+          const closingChannelId = device.channel;
+          clearTimeout(channel.adminGraceTimer);
+          channel.adminGraceTimer = setTimeout(() => {
+            const current = connectedDevices.get(persistentDeviceId);
+            const stillGone = !current || current.socketId === socket.id;
+            if (channels.get(closingChannelId) === channel && stillGone) {
+              forceCloseChannel(closingChannelId, "admin_disconnected");
+            }
+          }, ADMIN_RECONNECT_GRACE_MS);
         } else {
           broadcastChannelUpdate(device.channel);
         }
