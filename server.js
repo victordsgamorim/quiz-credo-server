@@ -496,6 +496,13 @@ const getCategoryTotals = (channelId) => {
     });
 };
 
+// The guests in the room who picked an answer to the current question: one who left no longer
+// counts
+const getSelectedGuestsCount = (channel) =>
+  [...(channel?.gameState?.guestSelections || [])].filter((deviceId) =>
+    channel.devices.has(deviceId)
+  ).length;
+
 const getChannelState = (channelId) => {
   const devices = getChannelDevices(channelId);
   const channel = channels.get(channelId);
@@ -505,7 +512,7 @@ const getChannelState = (channelId) => {
     ? getAnsweredGuestsCount(channel, channel.gameState.currentQuestionIndex)
     : { answeredCount: 0, totalGuests: 0 };
 
-  const selectedGuestsCount = channel?.gameState?.guestSelections?.size || 0;
+  const selectedGuestsCount = getSelectedGuestsCount(channel);
 
   return {
     channelId,
@@ -517,6 +524,7 @@ const getChannelState = (channelId) => {
     gameSettings: channel?.gameSettings || null,
     isVotingClosed: Boolean(channel?.isVotingClosed),
     isGameStarted: Boolean(channel?.isGameStarted),
+    adminAway: getAdminAway(channel),
     gameState: channel?.gameState
       ? {
           questions: channel.gameState.questions.map((q) => ({
@@ -586,7 +594,7 @@ const getChannelStateForLocale = (channelId, locale) => {
     ? getAnsweredGuestsCount(channel, channel.gameState.currentQuestionIndex)
     : { answeredCount: 0, totalGuests: 0 };
 
-  const selectedGuestsCount = channel?.gameState?.guestSelections?.size || 0;
+  const selectedGuestsCount = getSelectedGuestsCount(channel);
 
   return {
     channelId,
@@ -598,6 +606,7 @@ const getChannelStateForLocale = (channelId, locale) => {
     gameSettings: channel.gameSettings || null,
     isVotingClosed: Boolean(channel?.isVotingClosed),
     isGameStarted: Boolean(channel?.isGameStarted),
+    adminAway: getAdminAway(channel),
     gameState: channel?.gameState
       ? {
           questions: questionsForLocale.map((q) => ({
@@ -659,7 +668,9 @@ const removeDeviceFromChannel = (deviceId, reason, options = {}) => {
   }
 };
 
-const ADMIN_RECONNECT_GRACE_MS = 30000;
+// An admin who goes away (their connection drops or, during a game, the game goes to the
+// background on their device) pauses the game; the room closes if they're not back in this time
+const ADMIN_AWAY_TIMEOUT_MS = 60000;
 
 const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
   const channel = channels.get(channelId);
@@ -671,7 +682,7 @@ const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
     `[${new Date().toISOString()}] Force closing channel ${channelId} (reason: ${reason})`
   );
 
-  clearTimeout(channel.adminGraceTimer);
+  clearTimeout(channel.adminAwayTimer);
 
   // Limpar timer do jogo se existir
   if (channel.gameState?.timerInterval) {
@@ -688,6 +699,74 @@ const forceCloseChannel = (channelId, reason, { notifyAdmin = false } = {}) => {
   channels.delete(channelId);
 };
 
+// From the game's start to its results: the rules, then the questions
+const isInGame = (channel) =>
+  Boolean(channel.isGameStarted && !channel.gameState?.isShowingResults);
+
+// Whether the room's admin is away: their connection is gone or, during a game, the game is in the
+// background on their device. Once a game is over, its results stay up whether the admin is there
+// or not.
+const isAdminAway = (channelId, channel) => {
+  if (channel.gameState?.isShowingResults) return false;
+  const admin = connectedDevices.get(channel.adminId);
+  const isConnected = Boolean(admin?.socketId && io.sockets.sockets.has(admin.socketId));
+  if (!isConnected || admin.channel !== channelId) return true;
+  return isInGame(channel) && !admin.isActive;
+};
+
+// While the admin is away the question's time stands still: the countdown stops, and goes on from
+// where it stopped once they're back
+const pauseQuestionTimer = (channel) => {
+  const { gameState } = channel;
+  if (!gameState?.timerInterval) return;
+  clearInterval(gameState.timerInterval);
+  gameState.timerInterval = null;
+  gameState.isTimerPaused = true;
+};
+
+const resumeQuestionTimer = (channelId, channel) => {
+  if (!channel.gameState?.isTimerPaused) return;
+  startQuestionTimer(channelId);
+};
+
+// Pauses the room's game when its admin goes away, and closes the room if they're not back within
+// ADMIN_AWAY_TIMEOUT_MS; resumes the game once they're back. Called whenever the admin's
+// connection, their game's visibility or the game's stage changes; the callers then send the room
+// its update.
+const updateAdminPresence = (channelId) => {
+  const channel = channels.get(channelId);
+  if (!channel) return;
+  const isAway = isAdminAway(channelId, channel);
+  if (isAway === Boolean(channel.adminAwayUntil)) return;
+
+  if (isAway) {
+    console.log(`[${new Date().toISOString()}] Admin of channel ${channelId} is away: game paused`);
+    channel.adminAwayUntil = Date.now() + ADMIN_AWAY_TIMEOUT_MS;
+    channel.adminAwayTimer = setTimeout(() => {
+      if (channels.get(channelId) === channel) {
+        forceCloseChannel(channelId, "admin_inactive_timeout", { notifyAdmin: true });
+      }
+    }, ADMIN_AWAY_TIMEOUT_MS);
+    pauseQuestionTimer(channel);
+  } else {
+    console.log(`[${new Date().toISOString()}] Admin of channel ${channelId} is back: game resumed`);
+    clearTimeout(channel.adminAwayTimer);
+    channel.adminAwayTimer = null;
+    channel.adminAwayUntil = null;
+    resumeQuestionTimer(channelId, channel);
+  }
+};
+
+// While the admin is away: how long until the room closes. Every device counts down from it, so
+// their clocks don't need to match the server's
+const getAdminAway = (channel) =>
+  channel?.adminAwayUntil
+    ? {
+        closesInMs: Math.max(0, channel.adminAwayUntil - Date.now()),
+        timeoutMs: ADMIN_AWAY_TIMEOUT_MS,
+      }
+    : null;
+
 const startQuestionTimer = (channelId) => {
   const channel = channels.get(channelId);
   if (!channel || !channel.gameState) return;
@@ -695,12 +774,20 @@ const startQuestionTimer = (channelId) => {
   // Limpar timer anterior se existir
   if (channel.gameState.timerInterval) {
     clearInterval(channel.gameState.timerInterval);
+    channel.gameState.timerInterval = null;
   }
+  channel.gameState.isTimerPaused = false;
 
   // Se timerDuration é null, não iniciar timer (sem limite de tempo)
   const timerDuration = channel.gameSettings?.timerDuration;
   if (timerDuration === null) {
     console.log(`[${new Date().toISOString()}] No timer for channel ${channelId} (unlimited time)`);
+    return;
+  }
+
+  // The admin is away: the time runs once they're back
+  if (channel.adminAwayUntil) {
+    channel.gameState.isTimerPaused = true;
     return;
   }
 
@@ -729,13 +816,26 @@ const startQuestionTimer = (channelId) => {
 };
 
 // The devices a game ranks: its players (the guests, and the admin when debug mode lets them
-// answer), with the ones who answered and then left
+// answer), with the ones who answered and then left (a reload leaves the room for a moment), but
+// not the ones who quit the game
 const getRankedDeviceIds = (channel) => {
   const isDebugMode = Boolean(channel.gameSettings?.enableDebugMode);
-  const deviceIds = new Set([...channel.devices, ...channel.gameState.answers.keys()]);
+  const { answers, quitDeviceIds } = channel.gameState;
+  const deviceIds = new Set([...channel.devices, ...answers.keys()]);
   return [...deviceIds].filter(
-    (deviceId) => connectedDevices.has(deviceId) && (deviceId !== channel.adminId || isDebugMode)
+    (deviceId) =>
+      connectedDevices.has(deviceId) &&
+      !quitDeviceIds?.has(deviceId) &&
+      (deviceId !== channel.adminId || isDebugMode)
   );
+};
+
+// A player who quits the game (the leave button, not a reload) is out of its ranking too, until they
+// join the room again. What they did in the game stays: a steal still took its points
+const quitGame = (channel, deviceId) => {
+  if (!channel.gameState) return;
+  channel.gameState.quitDeviceIds = channel.gameState.quitDeviceIds || new Set();
+  channel.gameState.quitDeviceIds.add(deviceId);
 };
 
 // The game's players by points (the answers', with the bonuses and the steals), most first. On
@@ -818,6 +918,8 @@ const calculateRanking = (channel) => {
 io.on("connection", (socket) => {
   const persistentDeviceId = socket.handshake.auth.deviceId || socket.id;
   const deviceLocale = socket.handshake.auth.locale || "pt-BR";
+  // Whether the device has the game on screen; frontends from before the admin pause don't say
+  const isOnScreen = socket.handshake.auth.isActive !== false;
 
   console.log(
     `[${new Date().toISOString()}] Device connected: ${persistentDeviceId} (socket: ${socket.id}, locale: ${deviceLocale})`
@@ -825,17 +927,43 @@ io.on("connection", (socket) => {
 
   socketToDevice.set(socket.id, persistentDeviceId);
 
+  // A device back on a new connection (a reload, or a dropped connection coming back) is still in
+  // its room, unless it says it isn't: it left it while offline, and the leave got lost with the
+  // connection. Frontends from before the admin pause don't say which room they're in.
+  const claimedChannelId = socket.handshake.auth.channelId;
+  const previous = connectedDevices.get(persistentDeviceId);
+  const previousChannelId = previous?.channel;
+  const previousChannel = previousChannelId ? channels.get(previousChannelId) : null;
+  const wasInRoom = Boolean(previousChannel?.devices.has(persistentDeviceId));
+  const isStillInRoom =
+    wasInRoom && (claimedChannelId === undefined || claimedChannelId === previousChannelId);
+  if (wasInRoom && !isStillInRoom) {
+    if (previousChannel.adminId === persistentDeviceId) {
+      forceCloseChannel(previousChannelId, "admin_left");
+    } else {
+      quitGame(previousChannel, persistentDeviceId);
+      removeDeviceFromChannel(persistentDeviceId);
+    }
+  }
+
   connectedDevices.set(persistentDeviceId, {
     id: persistentDeviceId,
     socketId: socket.id,
     connectedAt: Date.now(),
-    channel: null,
-    isActive: true,
-    role: "guest",
-    displayName: null,
-    isReady: false,
+    channel: isStillInRoom ? previousChannelId : null,
+    isActive: isOnScreen,
+    role: isStillInRoom ? previous.role : "guest",
+    displayName: isStillInRoom ? previous.displayName : null,
+    isReady: isStillInRoom ? previous.isReady : false,
     locale: deviceLocale,
   });
+
+  if (isStillInRoom) {
+    socket.join(previousChannelId);
+    // The admin back resumes the game
+    updateAdminPresence(previousChannelId);
+    broadcastChannelUpdate(previousChannelId);
+  }
 
   socket.on("create-channel", (channelId, deviceId, options = {}) => {
     const actualDeviceId = deviceId || persistentDeviceId;
@@ -930,11 +1058,9 @@ io.on("connection", (socket) => {
     channel.isVotingClosed = Boolean(channel.isVotingClosed);
     channel.isGameStarted = Boolean(channel.isGameStarted);
 
-    if (channel.adminId === actualDeviceId) {
-      clearTimeout(channel.adminGraceTimer);
-    }
-
     channel.devices.add(actualDeviceId);
+    // Back in the room after quitting its game: back in the game's ranking
+    channel.gameState?.quitDeviceIds?.delete(actualDeviceId);
     device.channel = channelId;
     device.socketId = socket.id;
     device.role = channel.adminId === actualDeviceId ? "admin" : "guest";
@@ -949,6 +1075,8 @@ io.on("connection", (socket) => {
       )
     );
 
+    // The admin back (a reload) resumes the game
+    updateAdminPresence(channelId);
     broadcastChannelUpdate(channelId);
 
     const deviceLocale = device.locale || "pt-BR";
@@ -962,7 +1090,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("leave-channel", (channelId) => {
+  // isQuitting: the player's own leave (the leave button), not a reload's; it takes them out of the
+  // game's ranking too
+  socket.on("leave-channel", (channelId, options) => {
     const device = connectedDevices.get(persistentDeviceId);
     const activeChannel = device?.channel || channelId;
 
@@ -981,16 +1111,25 @@ io.on("connection", (socket) => {
     if (channel && channel.adminId === persistentDeviceId) {
       forceCloseChannel(activeChannel, "admin_left");
     } else {
+      if (channel && options?.isQuitting) {
+        quitGame(channel, persistentDeviceId);
+      }
       removeDeviceFromChannel(persistentDeviceId);
+      // Already out of the room (it left offline, and its reconnection took it out): the ranking
+      // changes all the same
+      broadcastLiveRanking(activeChannel);
     }
   });
 
   socket.on("device-status", (status) => {
     const device = connectedDevices.get(persistentDeviceId);
-    if (device) {
-      device.isActive = status.isActive;
+    // Only the device's current connection tells whether it has the game on screen
+    if (device && device.socketId === socket.id) {
+      device.isActive = Boolean(status?.isActive);
 
       if (device.channel) {
+        // The admin's game in the background pauses it, and back on screen resumes it
+        updateAdminPresence(device.channel);
         broadcastChannelUpdate(device.channel);
       }
     }
@@ -1157,6 +1296,8 @@ io.on("connection", (socket) => {
     }
 
     channel.isGameStarted = true;
+    // From now on, the admin's game in the background pauses it
+    updateAdminPresence(channelId);
     io.to(channelId).emit("game-started", { channelId, devices });
     broadcastChannelUpdate(channelId);
   });
@@ -1452,6 +1593,8 @@ io.on("connection", (socket) => {
     ) {
       // Jogo terminou - mostrar resultados
       channel.gameState.isShowingResults = true;
+      // The results stay up, whether the admin is there or not
+      updateAdminPresence(channelId);
 
       // Calcular ranking
       const ranking = calculateRanking(channel);
@@ -1533,6 +1676,9 @@ io.on("connection", (socket) => {
       }
     });
 
+    // Back in the lobby, the admin's game in the background no longer pauses anything
+    updateAdminPresence(channelId);
+
     // Notify all devices in the channel to return to lobby
     io.to(channelId).emit("game-reset", { channelId });
 
@@ -1599,25 +1745,16 @@ io.on("connection", (socket) => {
     socketToDevice.delete(socket.id);
 
     const device = connectedDevices.get(persistentDeviceId);
-    if (device) {
+    // Gone for good only if no newer connection of the device took over (a reload, or a dropped
+    // connection that already came back)
+    if (device && device.socketId === socket.id) {
       device.isActive = false;
 
       if (device.channel) {
-        const channel = channels.get(device.channel);
-        if (channel && channel.adminId === persistentDeviceId) {
-          // A reload drops the socket for a moment: give the admin time to come back
-          const closingChannelId = device.channel;
-          clearTimeout(channel.adminGraceTimer);
-          channel.adminGraceTimer = setTimeout(() => {
-            const current = connectedDevices.get(persistentDeviceId);
-            const stillGone = !current || current.socketId === socket.id;
-            if (channels.get(closingChannelId) === channel && stillGone) {
-              forceCloseChannel(closingChannelId, "admin_disconnected");
-            }
-          }, ADMIN_RECONNECT_GRACE_MS);
-        } else {
-          broadcastChannelUpdate(device.channel);
-        }
+        // The admin gone pauses the game, and closes the room if they're not back in time (a
+        // reload drops the connection for a moment)
+        updateAdminPresence(device.channel);
+        broadcastChannelUpdate(device.channel);
       }
 
       setTimeout(() => {
