@@ -192,6 +192,8 @@ const getPowerUpRejection = (channel, device, { powerUpId, targetDeviceId }) => 
   if (gameState.isShowingResults || questionIndex >= gameState.questions.length) {
     return "no_question";
   }
+  // Power-ups only work up to the second-to-last question
+  if (questionIndex === gameState.questions.length - 1) return "last_question";
   const hasAnswered = (gameState.answers.get(device.id) || []).some(
     (answer) => answer.questionIndex === questionIndex
   );
@@ -264,7 +266,8 @@ const toPowerUpPlayer = (deviceId) => {
 // happened (a steal can take points a bonus gave). A steal takes the game's stealPoints, or all the
 // target has when that's less, so nobody goes below zero; a steal the target's shield blocks takes
 // nothing. Replaying the whole game keeps it right when a later shield undoes a steal: the steals
-// after it are worked out again.
+// after it are worked out again. It also tells when each device's points last changed: on equal
+// points, the ranking keeps the one who got there first ahead.
 const replayScores = (channel) => {
   const { gameState } = channel;
   const { stealPoints, bonusPoints } = getPowerUpSettings(channel);
@@ -285,21 +288,26 @@ const replayScores = (channel) => {
 
   const scores = new Map();
   const stolenPoints = new Map(); // steal -> points it took
+  const changedAt = new Map(); // deviceId -> when its points last changed
   const scoreOf = (deviceId) => scores.get(deviceId) || 0;
+  const addPoints = (deviceId, points, timestamp) => {
+    scores.set(deviceId, scoreOf(deviceId) + points);
+    if (points !== 0) changedAt.set(deviceId, timestamp);
+  };
 
-  events.forEach(({ deviceId, points, steal }) => {
+  events.forEach(({ timestamp, deviceId, points, steal }) => {
     if (!steal) {
-      scores.set(deviceId, scoreOf(deviceId) + points);
+      addPoints(deviceId, points, timestamp);
       return;
     }
     const isBlocked = isAttackBlocked(gameState.powerUps, steal);
     const taken = isBlocked ? 0 : Math.min(stealPoints, Math.max(0, scoreOf(steal.targetDeviceId)));
-    scores.set(steal.targetDeviceId, scoreOf(steal.targetDeviceId) - taken);
-    scores.set(steal.deviceId, scoreOf(steal.deviceId) + taken);
+    addPoints(steal.targetDeviceId, -taken, timestamp);
+    addPoints(steal.deviceId, taken, timestamp);
     stolenPoints.set(steal, taken);
   });
 
-  return { scores, stolenPoints };
+  return { scores, stolenPoints, changedAt };
 };
 
 // Tells the attacker and the target how each disadvantage of the question turned out, when it's
@@ -556,6 +564,9 @@ const broadcastChannelUpdate = (channelId) => {
     console.log(`[${new Date().toISOString()}] Broadcasting same state to all devices in channel ${channelId}`);
     io.to(channelId).emit("channel-update", getChannelState(channelId));
   }
+
+  // Answers and players joining or leaving come with a room update, and can change the ranking
+  broadcastLiveRanking(channelId);
 };
 
 const getChannelStateForLocale = (channelId, locale) => {
@@ -717,23 +728,68 @@ const startQuestionTimer = (channelId) => {
   }, 1000);
 };
 
-const calculateRanking = (channel) => {
-  const ranking = [];
-  // The answers' points, with the steals taken out of and given to each device
-  const { scores } = replayScores(channel);
+// The devices a game ranks: its players (the guests, and the admin when debug mode lets them
+// answer), with the ones who answered and then left
+const getRankedDeviceIds = (channel) => {
+  const isDebugMode = Boolean(channel.gameSettings?.enableDebugMode);
+  const deviceIds = new Set([...channel.devices, ...channel.gameState.answers.keys()]);
+  return [...deviceIds].filter(
+    (deviceId) => connectedDevices.has(deviceId) && (deviceId !== channel.adminId || isDebugMode)
+  );
+};
 
+// The game's players by points (the answers', with the bonuses and the steals), most first. On
+// equal points, the one who got there first stays ahead, so a player has to pass another to
+// overtake them; before anyone scores, the room's order
+const rankPlayers = (channel) => {
+  const { scores, changedAt } = replayScores(channel);
+  return getRankedDeviceIds(channel)
+    .map((deviceId, order) => ({
+      deviceId,
+      order,
+      totalPoints: scores.get(deviceId) || 0,
+      changedAt: changedAt.get(deviceId) || 0,
+    }))
+    .sort((a, b) => b.totalPoints - a.totalPoints || a.changedAt - b.changedAt || a.order - b.order)
+    .map(({ deviceId, totalPoints }, index) => ({ position: index + 1, deviceId, totalPoints }));
+};
+
+// The ranking while the game's questions play: the final ranking's order, with only the points
+const getLiveRanking = (channel) =>
+  rankPlayers(channel).map(({ position, deviceId, totalPoints }) => ({
+    position,
+    deviceId,
+    displayName: connectedDevices.get(deviceId)?.displayName || deviceId,
+    totalPoints,
+  }));
+
+const isGameUnderWay = (channel) =>
+  Boolean(
+    channel?.isGameStarted &&
+      channel.gameState?.questions?.length &&
+      !channel.gameState.isShowingResults
+  );
+
+// Sends the room the live ranking when it changed: answers, power-ups, players joining or leaving
+const broadcastLiveRanking = (channelId) => {
+  const channel = channels.get(channelId);
+  if (!isGameUnderWay(channel)) return;
+  const ranking = getLiveRanking(channel);
+  const key = JSON.stringify(ranking);
+  if (channel.gameState.liveRankingKey === key) return;
+  channel.gameState.liveRankingKey = key;
+  io.to(channelId).emit("ranking-update", { ranking });
+};
+
+// The final ranking, when the game ends: the live ranking with each player's answers
+const calculateRanking = (channel) => {
   console.log(
     `[${new Date().toISOString()}] Calculating ranking for ${channel.gameState.answers.size} devices`
   );
 
-  channel.gameState.answers.forEach((answers, deviceId) => {
+  const ranking = rankPlayers(channel).map(({ position, deviceId, totalPoints }) => {
     const device = connectedDevices.get(deviceId);
-    if (!device) {
-      console.warn(`Device ${deviceId} not found in connectedDevices`);
-      return;
-    }
-
-    const totalPoints = scores.get(deviceId) || 0;
+    const answers = channel.gameState.answers.get(deviceId) || [];
     const correctAnswers = answers.filter((a) => a.isCorrect).length;
     const totalAnswers = answers.length;
     const accuracy = totalAnswers > 0 ? (correctAnswers / totalAnswers) * 100 : 0;
@@ -742,7 +798,8 @@ const calculateRanking = (channel) => {
       `  ${device.displayName} (${device.role}): ${totalPoints} pts, ${correctAnswers}/${totalAnswers} correct`
     );
 
-    ranking.push({
+    return {
+      position,
       deviceId,
       displayName: device.displayName,
       role: device.role,
@@ -750,15 +807,7 @@ const calculateRanking = (channel) => {
       correctAnswers,
       totalAnswers,
       accuracy: Math.round(accuracy),
-    });
-  });
-
-  // Ordenar por pontos (maior para menor)
-  ranking.sort((a, b) => b.totalPoints - a.totalPoints);
-
-  // Adicionar posição
-  ranking.forEach((entry, index) => {
-    entry.position = index + 1;
+    };
   });
 
   console.log(`[${new Date().toISOString()}] Final ranking:`, JSON.stringify(ranking, null, 2));
@@ -904,9 +953,12 @@ io.on("connection", (socket) => {
 
     const deviceLocale = device.locale || "pt-BR";
     socket.emit("joined-channel", getChannelStateForLocale(channelId, deviceLocale));
-    // Back in a game under way (a reload): the same hand as before
+    // Back in a game under way (a reload): the same hand as before, and the ranking so far
     if (channel.isGameStarted && channel.gameState?.questions?.length) {
       emitPowerUpHand(channel, actualDeviceId);
+    }
+    if (isGameUnderWay(channel)) {
+      socket.emit("ranking-update", { ranking: getLiveRanking(channel) });
     }
   });
 
@@ -1196,6 +1248,10 @@ io.on("connection", (socket) => {
     // Iniciar timer sincronizado
     startQuestionTimer(channelId);
 
+    // Everyone starts the ranking at 0, sent before the first question shows
+    channel.gameState.liveRankingKey = null;
+    broadcastLiveRanking(channelId);
+
     // Broadcast estado atualizado
     broadcastChannelUpdate(channelId);
   });
@@ -1356,6 +1412,8 @@ io.on("connection", (socket) => {
 
     // A disadvantage is told at once; a shield blocks the ones already used on the player too
     emitPowerUpOutcomes(channel, questionIndex);
+    // A bonus or a steal changes the points at once, and a shield can undo a steal
+    broadcastLiveRanking(channelId);
   });
 
   socket.on("next-question", (payload) => {
