@@ -1652,8 +1652,10 @@ io.on("connection", (socket) => {
       clearInterval(channel.gameState.timerInterval);
     }
 
-    // Reset game state but keep categories and ready states
+    // Reset game state but keep the categories voted. Voting, closed when the game started, opens
+    // again: the guests can change their votes for the next game, and a guest who joins now can vote
     channel.isGameStarted = false;
+    channel.isVotingClosed = false;
 
     // Resetar estado do jogo
     channel.gameState = {
