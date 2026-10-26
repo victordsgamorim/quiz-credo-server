@@ -1,0 +1,13 @@
+# Dependencies: npm ci installs them from package-lock.json
+node_modules/
+
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+
+# Logs and editor or OS files
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/

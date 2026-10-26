@@ -1,20 +1,22 @@
 {
   "name": "quiz-credo-server",
   "version": "1.0.0",
+  "private": true,
   "description": "Dedicated Socket.IO server for QuizCredo game state and communication.",
   "main": "server.js",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.js",
-    "dev": "npm run start"
+    "dev": "npm run start",
+    "test": "node --test --test-force-exit --test-timeout=20000 \"test/**/*.test.js\""
   },
   "dependencies": {
-    "express": "^5.2.1",
-    "socket.io": "^4.8.1",
-    "cors": "^2.8.5",
-    "os": "^0.1.2" 
+    "socket.io": "^4.8.4"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "socket.io-client": "^4.8.4"
   }
 }
