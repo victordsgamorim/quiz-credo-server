@@ -1,6 +1,8 @@
 // The frontend's development servers, allowed when FRONTEND_URL doesn't say
 const DEVELOPMENT_ORIGINS = [
   "http://localhost:3001",
+  "http://localhost:8080",
+  "http://127.0.0.1:8080",
   "http://localhost:5173",
   "http://127.0.0.1:5173",
 ];
@@ -118,7 +120,9 @@ export const loadConfig = (env = process.env) => {
 
   return Object.freeze({
     port: readInteger(env, "PORT", 3001, { min: 0, max: 65535 }),
-    host: env.HOST?.trim() || "0.0.0.0",
+    // Without a host, Node listens on every address, IPv4 and IPv6 (so "localhost" works whichever
+    // one it resolves to)
+    host: env.HOST?.trim() || undefined,
     environment: env.NODE_ENV || "development",
     logLevel,
     // The frontend's origins (comma-separated): the only websites whose pages can connect
