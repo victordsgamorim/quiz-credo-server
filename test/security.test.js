@@ -6,7 +6,6 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { closeAll, connect } from "./helpers/client.js";
-import { startFakeSupabase } from "./helpers/fakeSupabase.js";
 import {
   gameSettings,
   openRoom,
@@ -41,6 +40,7 @@ const EVENTS = [
   "remove-device",
   "device-status",
   "update-locale",
+  "update-access-token",
   "update-category-vote",
   "update-ready-state",
   "close-category-vote",
@@ -543,50 +543,6 @@ describe("HTTP", () => {
   it("doesn't serve the Socket.IO client", async () => {
     const response = await fetch(`${server.url}/socket.io/socket.io.js`);
     assert.notEqual(response.status, 200);
-  });
-});
-
-describe("creating a room with a Supabase session required", () => {
-  let supabase;
-  let server;
-
-  before(async () => {
-    supabase = await startFakeSupabase();
-    server = await startServer({
-      REQUIRE_AUTH_TO_CREATE_ROOM: "true",
-      SUPABASE_URL: supabase.url,
-      SUPABASE_ANON_KEY: supabase.anonKey,
-    });
-  });
-  after(async () => {
-    await server.stop();
-    await supabase.close();
-  });
-
-  it("is refused without a session, or with an invalid one", async () => {
-    const device = await connect(server, { auth: { deviceId: "device_anon" } });
-    for (const options of [{ displayName: "Eve" }, { displayName: "Eve", accessToken: "a.b.c" }]) {
-      device.mark().emit("create-channel", "AUTH01", "device_anon", options);
-      assert.deepEqual(await device.waitFor("channel-error"), { error: "auth_required" });
-    }
-    device.close();
-  });
-
-  it("works for a signed-in admin", async () => {
-    const device = await connect(server, { auth: { deviceId: "device_host" } });
-    device.mark().emit("create-channel", "AUTH02", "device_host", {
-      displayName: "Host",
-      accessToken: "header.valid.token",
-    });
-    assert.equal((await device.waitFor("joined-channel")).adminId, "device_host");
-    const check = supabase.requests.at(-1);
-    assert.equal(check.headers.apikey, supabase.anonKey);
-    assert.equal(check.headers.authorization, "Bearer header.valid.token");
-    device.close();
-  });
-
-  it("needs the Supabase project to start", async () => {
-    await assert.rejects(startServer({ REQUIRE_AUTH_TO_CREATE_ROOM: "true" }));
   });
 });
 

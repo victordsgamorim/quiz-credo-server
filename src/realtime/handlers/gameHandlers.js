@@ -5,6 +5,7 @@ import {
   parseLoadQuestions,
   parsePowerUp,
 } from "../validation.js";
+import { createRequestBinder } from "./bindRequest.js";
 
 /**
  * The room's game: its questions, the players' answers and power-ups, and the admin moving it on
@@ -15,19 +16,12 @@ import {
  */
 export const registerGameHandlers = ({ socket, on, context }) => {
   const { game } = context;
-  const { deviceId } = socket.data;
+  const bind = createRequestBinder({ socket, on, context });
 
-  // Each event's payload, checked, then its use case; a payload of the wrong shape is ignored
-  const bind = (event, parse, handle) =>
-    on(event, (payload) => {
-      const request = parse(payload);
-      if (request) handle(deviceId, request);
-    });
-
-  bind("load-questions", parseLoadQuestions, game.loadQuestions);
+  bind("load-questions", parseLoadQuestions, game.loadQuestions, { isAdminAction: true });
   bind("guest-selected-answer", parseAnswerSelection, game.selectAnswer);
   bind("submit-answer", parseAnswer, game.submitAnswer);
   bind("use-power-up", parsePowerUp, game.usePowerUp);
-  bind("next-question", parseChannelOnly, game.nextQuestion);
-  bind("reset-game", parseChannelOnly, game.resetGame);
+  bind("next-question", parseChannelOnly, game.nextQuestion, { isAdminAction: true });
+  bind("reset-game", parseChannelOnly, game.resetGame, { isAdminAction: true });
 };

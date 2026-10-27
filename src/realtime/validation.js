@@ -7,6 +7,7 @@ const CHANNEL_ID_PATTERN = /^[A-Z0-9]{4,16}$/;
 // connection's id the server falls back to
 const DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_POWER_UP_ID_LENGTH = 32;
+const MAX_ACCESS_TOKEN_LENGTH = 8192;
 const MAX_QUESTION_INDEX = 1000;
 const MAX_ANSWER_INDEX = 100;
 const MAX_VOTED_CATEGORIES = 50;
@@ -31,16 +32,25 @@ const parseChannelPayload = (payload) =>
  * create-channel and join-channel: (channelId, deviceId, options). The deviceId argument is
  * ignored: a connection acts for its own device only.
  *
- * @returns { channelId, displayName, accessToken }, or { error } for a room id that isn't a code
+ * @returns { channelId, displayName }, or { error } for a room id that isn't a code
  */
 export const parseRoomRequest = (channelId, options) => {
   if (!isValidChannelId(channelId)) return { error: "invalid_channel_id" };
-  const { displayName, accessToken } = isPlainObject(options) ? options : {};
+  const { displayName } = isPlainObject(options) ? options : {};
   return {
     channelId,
     displayName: typeof displayName === "string" ? displayName : undefined,
-    accessToken: typeof accessToken === "string" ? accessToken : undefined,
   };
+};
+
+// update-access-token: the device's Supabase access token, or null when it signed out
+export const parseAccessToken = (payload) => {
+  if (!isPlainObject(payload)) return null;
+  const { accessToken } = payload;
+  if (accessToken === null || accessToken === undefined) return { accessToken: null };
+  return typeof accessToken === "string" && accessToken.length <= MAX_ACCESS_TOKEN_LENGTH
+    ? { accessToken }
+    : null;
 };
 
 // leave-channel: (channelId, { isQuitting }); the room only counts when the device is in none

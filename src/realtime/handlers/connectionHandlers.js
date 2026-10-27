@@ -3,6 +3,7 @@ import { isValidLocale } from "../../domain/locales.js";
 import {
   isPlainObject,
   isValidChannelId,
+  parseAccessToken,
   parseDeviceStatus,
   parseLocaleChange,
 } from "../validation.js";
@@ -23,9 +24,14 @@ const parseClaimedChannelId = (channelId) => {
  * @param options.context - The server's services
  */
 export const registerConnectionHandlers = ({ socket, on, context }) => {
-  const { devices, rooms, notifier, logger } = context;
+  const { devices, rooms, notifier, adminSessions, logger } = context;
   const auth = isPlainObject(socket.handshake.auth) ? socket.handshake.auth : {};
   const { deviceId, deviceToken, tokenHash } = socket.data.identity;
+
+  // An admin signed in to Supabase sends their session with the connection
+  if (typeof auth.accessToken === "string") {
+    adminSessions.setToken(socket, auth.accessToken);
+  }
 
   // A frontend that keeps a device token gets its identity first, before anything about its room
   if (deviceToken) {
@@ -57,6 +63,12 @@ export const registerConnectionHandlers = ({ socket, on, context }) => {
   on("update-locale", (payload) => {
     const request = parseLocaleChange(payload);
     if (request) devices.setLocale(deviceId, request.locale);
+  });
+
+  // The admin signing in or out, or their session renewed (Supabase renews it every hour)
+  on("update-access-token", (payload) => {
+    const request = parseAccessToken(payload);
+    if (request) adminSessions.setToken(socket, request.accessToken);
   });
 
   on("ping", () => socket.emit("pong", { timestamp: Date.now() }));

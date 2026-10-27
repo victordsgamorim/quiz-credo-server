@@ -11,6 +11,7 @@ import { registerConnectionHandlers } from "./handlers/connectionHandlers.js";
 import { registerGameHandlers } from "./handlers/gameHandlers.js";
 import { registerLobbyHandlers } from "./handlers/lobbyHandlers.js";
 import { registerRoomHandlers } from "./handlers/roomHandlers.js";
+import { createAdminSessions } from "./security/adminSessions.js";
 import { createClientIpResolver } from "./security/clientIp.js";
 import { createConnectionGuard } from "./security/connectionGuard.js";
 import { createDeviceIdentity } from "./security/deviceIdentity.js";
@@ -71,9 +72,14 @@ export const createSocketServer = (httpServer, { config, logger }) => {
     devices: createDeviceService({ store, rooms, notifier, logger, config }),
     lobby: createLobbyService({ store, rooms, notifier, logger }),
     game: createGameService({ store, rooms, notifier, timer, logger }),
-    roomCreationAuth: config.requireAuthToCreateRoom
-      ? createSupabaseAuth({ ...config.supabase, logger })
-      : null,
+    adminSessions: createAdminSessions({
+      supabaseAuth: config.requireAdminAuth
+        ? createSupabaseAuth({ ...config.supabase, logger })
+        : null,
+      adminRole: config.adminRole,
+      store,
+      logger,
+    }),
     failedJoins: createKeyedLimiter(FAILED_JOINS_PER_IP),
     logger,
   };

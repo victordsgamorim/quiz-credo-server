@@ -16,9 +16,11 @@ const MAX_DISPLAY_NAME_LENGTH = 50;
 export const createRoomService = ({ store, notifier, timer, logger, config }) => {
   const { channels, devices } = store;
 
-  const createChannel = (channelId, adminId) => {
+  const createChannel = (channelId, adminId, adminUserId) => {
     const channel = {
       adminId,
+      // The Supabase user who created the room (null when sessions aren't required)
+      adminUserId,
       devices: new Set(),
       votes: new Map(),
       isVotingClosed: false,
@@ -138,7 +140,7 @@ export const createRoomService = ({ store, notifier, timer, logger, config }) =>
    *
    * @returns The device and its room, or the error to tell it
    */
-  const openRoom = (deviceId, channelId, { displayName } = {}, socketId) => {
+  const openRoom = (deviceId, channelId, { displayName } = {}, socketId, adminUserId = null) => {
     const device = devices.get(deviceId);
     if (!device) {
       logger.warn("Unknown device creating a room", { deviceId });
@@ -156,7 +158,7 @@ export const createRoomService = ({ store, notifier, timer, logger, config }) =>
     }
 
     setDisplayName(device, displayName);
-    const channel = createChannel(channelId, deviceId);
+    const channel = createChannel(channelId, deviceId, adminUserId);
     addDevice(channelId, channel, device, socketId);
     logger.info("Room created", { channelId, adminId: deviceId });
     return { device, channel };

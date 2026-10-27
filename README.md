@@ -28,7 +28,7 @@ src/
     validation.js           what each event's payload must look like
     handlers/               one module per area: connection, rooms, lobby, game
     security/               origins and connection limits, device identity, event limits,
-                            Supabase sessions
+                            admins' Supabase sessions
   services/               the use cases: rooms, devices, lobby, game, countdown, and what the
                           server sends the devices (notifier)
   domain/                 the game's rules, without I/O: scoring, power-ups, ranking, settings,
@@ -49,24 +49,25 @@ keeps the behavior: `QUIZ_SERVER_ENTRY=path/to/server.js node --test test/behavi
 
 ## Configuration
 
-| Variable                        | Default                                                                   | What it does                                                                                                                           |
-| ------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `PORT`                          | `3001`                                                                    | The port it listens on (Render sets it).                                                                                               |
-| `FRONTEND_URL`                  | `http://localhost:3001`, `http://localhost:5173`, `http://127.0.0.1:5173` | The frontend's origins, comma-separated: **the only websites whose pages can connect**. List every domain the frontend is served from. |
-| `CLIENT_IP_HEADER`              | `cf-connecting-ip` on Render, none elsewhere                              | The header a trusted proxy writes the caller's address in (a single address). Without one, the connection's address.                   |
-| `REQUIRE_DEVICE_TOKEN`          | `false`                                                                   | Refuses frontends that don't keep a device token (see [Device identity](#device-identity)).                                            |
-| `REQUIRE_AUTH_TO_CREATE_ROOM`   | `false`                                                                   | Only admins signed in to Supabase can create a room. Needs the two variables below.                                                    |
-| `SUPABASE_URL`                  |                                                                           | The Supabase project (the frontend's `VITE_SUPABASE_URL`).                                                                             |
-| `SUPABASE_ANON_KEY`             |                                                                           | The project's anon (public) key (the frontend's `VITE_SUPABASE_ANON_KEY`).                                                             |
-| `MAX_CONNECTIONS`               | `5000`                                                                    | Open connections, in all.                                                                                                              |
-| `MAX_CONNECTIONS_PER_IP`        | `100`                                                                     | Open connections from one address (a classroom on the same Wi-Fi shares one).                                                          |
-| `CONNECTIONS_PER_IP_PER_MINUTE` | `120`                                                                     | New connections from one address per minute (all at once, then evenly).                                                                |
-| `MAX_ROOMS`                     | `1000`                                                                    | Rooms open at once.                                                                                                                    |
-| `MAX_DEVICES_PER_ROOM`          | `100`                                                                     | Devices in a room.                                                                                                                     |
-| `MAX_MESSAGE_BYTES`             | `524288`                                                                  | The largest message a device can send (a game's questions in every language take far less).                                            |
-| `ADMIN_AWAY_TIMEOUT_MS`         | `60000`                                                                   | How long a room waits for an admin who went away before it closes.                                                                     |
-| `INACTIVE_DEVICE_TIMEOUT_MS`    | `600000`                                                                  | How long a device whose connection is gone stays in its room.                                                                          |
-| `LOG_LEVEL`                     | `info`                                                                    | `debug`, `info`, `warn`, `error` or `silent`.                                                                                          |
+| Variable                        | Default                                                                   | What it does                                                                                                                                     |
+| ------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`                          | `3001`                                                                    | The port it listens on (Render sets it).                                                                                                         |
+| `FRONTEND_URL`                  | `http://localhost:3001`, `http://localhost:5173`, `http://127.0.0.1:5173` | The frontend's origins, comma-separated: **the only websites whose pages can connect**. List every domain the frontend is served from.           |
+| `CLIENT_IP_HEADER`              | `cf-connecting-ip` on Render, none elsewhere                              | The header a trusted proxy writes the caller's address in (a single address). Without one, the connection's address.                             |
+| `REQUIRE_DEVICE_TOKEN`          | `false`                                                                   | Refuses frontends that don't keep a device token (see [Device identity](#device-identity)).                                                      |
+| `REQUIRE_ADMIN_AUTH`            | `false`                                                                   | Creating a room and running its game need a Supabase session of an admin (see [Admin sessions](#admin-sessions)). Needs the two variables below. |
+| `ADMIN_ROLE`                    | `admin`                                                                   | The role (`app_metadata.role` of the Supabase user) that can run games.                                                                          |
+| `SUPABASE_URL`                  |                                                                           | The Supabase project (the frontend's `VITE_SUPABASE_URL`).                                                                                       |
+| `SUPABASE_ANON_KEY`             |                                                                           | The project's anon (public) key (the frontend's `VITE_SUPABASE_ANON_KEY`).                                                                       |
+| `MAX_CONNECTIONS`               | `5000`                                                                    | Open connections, in all.                                                                                                                        |
+| `MAX_CONNECTIONS_PER_IP`        | `100`                                                                     | Open connections from one address (a classroom on the same Wi-Fi shares one).                                                                    |
+| `CONNECTIONS_PER_IP_PER_MINUTE` | `120`                                                                     | New connections from one address per minute (all at once, then evenly).                                                                          |
+| `MAX_ROOMS`                     | `1000`                                                                    | Rooms open at once.                                                                                                                              |
+| `MAX_DEVICES_PER_ROOM`          | `100`                                                                     | Devices in a room.                                                                                                                               |
+| `MAX_MESSAGE_BYTES`             | `524288`                                                                  | The largest message a device can send (a game's questions in every language take far less).                                                      |
+| `ADMIN_AWAY_TIMEOUT_MS`         | `60000`                                                                   | How long a room waits for an admin who went away before it closes.                                                                               |
+| `INACTIVE_DEVICE_TIMEOUT_MS`    | `600000`                                                                  | How long a device whose connection is gone stays in its room.                                                                                    |
+| `LOG_LEVEL`                     | `info`                                                                    | `debug`, `info`, `warn`, `error` or `silent`.                                                                                                    |
 
 `.env.example` has them all. The server doesn't read `.env` files: set them in the environment
 (Render's Environment tab).
@@ -101,6 +102,9 @@ What the server does so that a client other than the frontend can't harm the gam
   address are limited too, so room codes can't be guessed.
 - **A connection acts for its own device only.** The `deviceId` that `create-channel` and
   `join-channel` send is ignored. See [Device identity](#device-identity) for the device itself.
+- **Admin actions need an admin's Supabase session** (opt-in with `REQUIRE_ADMIN_AUTH`, see
+  [Admin sessions](#admin-sessions)): creating a room and running its game are the signed-in
+  admin's, checked with Supabase on every token, not just when the room is created.
 - **The answers stay on the server until the question is over.** The other devices only get a
   question's `correctAnswer` once someone answered it, its time is up, or the game moved past it
   (the admin, who loaded the questions, gets them all).
@@ -131,17 +135,40 @@ can't be impersonated:
 Frontends without device tokens (no `deviceToken` key) keep working as before, with their own ids,
 until `REQUIRE_DEVICE_TOKEN=true`; turn it on once every device runs a frontend that keeps tokens.
 
-### Room creation
+### Admin sessions
 
-With `REQUIRE_AUTH_TO_CREATE_ROOM=true`, `create-channel` needs the admin's Supabase access token
-in its options (`{ displayName, accessToken }`); the server checks it with Supabase's Auth API
-(`GET /auth/v1/user`), whatever keys the project signs tokens with. Without a valid session, the
-device gets `channel-error` `{ error: "auth_required" }`.
+With `REQUIRE_ADMIN_AUTH=true`, only a signed-in admin creates a room and runs its game; the
+guests need no session. The admin is a Supabase user whose `app_metadata.role` is `admin`
+(`ADMIN_ROLE`). That field is only editable with the project's service role or SQL, never by the
+user: `user_metadata` and a signed-up account prove nothing.
+
+1. The device sends its Supabase access token (`session.access_token`) in the handshake's `auth`
+   (`accessToken`), and again with `update-access-token` (`{ accessToken }`, `null` when it signed
+   out) whenever the token changes: signing in, signing out, and Supabase's renewal every hour.
+2. The server checks the token with Supabase's Auth API (`GET /auth/v1/user`, whatever keys the
+   project signs tokens with), so a role taken away counts at the next token. It keeps the user,
+   the role and the token's expiry on the connection, never the token, and never logs it.
+3. `create-channel` needs a session of a user with the role, and the room belongs to that user.
+4. The room's **admin actions** need the owner's session: `update-game-settings`, `start-game`,
+   `close-category-vote`, `load-questions`, `next-question`, `reset-game` and `remove-device`. The
+   admin's device must also be the room's (as before).
+
+A refused action changes nothing and the device gets `channel-error`: `auth_required` (no valid
+session), `auth_expired` (the token expired: Supabase's client renews it, and the frontend sends
+the new one), or `admin_required` (a session without the role, or of another user than the room's
+owner). Checks are limited per address (30 at once, then one every two seconds), and a value that
+isn't shaped like a token is never sent to Supabase.
+
+Before turning it on, make sure the Supabase project can't hand out admin sessions to anyone: the
+database's user-management functions must not be callable with the public key, and new sign-ups
+should be closed (or at least unable to get the role). The frontend must send the sessions
+first (turning it on before refuses every room creation).
 
 ### Errors the frontend can get
 
 Besides `device_not_found`, `channel_not_found` and `channel_already_exists`, `channel-error` can
-be `invalid_channel_id`, `auth_required`, `room_full`, `too_many_rooms` and `rate_limited`. A
+be `invalid_channel_id`, `auth_required`, `auth_expired`, `admin_required`, `room_full`,
+`too_many_rooms` and `rate_limited`. A
 connection can be refused (`connect_error`) with `origin_not_allowed`, `too_many_connections`,
 `too_many_new_connections`, `server_busy` and `device_token_required`.
 
