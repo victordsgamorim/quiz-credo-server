@@ -42,7 +42,8 @@ httpServer.listen(config.port, config.host, () => {
     allowedOrigins: config.allowedOrigins,
     clientIpHeader: config.clientIpHeader || null,
     requireDeviceToken: config.requireDeviceToken,
-    requireAuthToCreateRoom: config.requireAuthToCreateRoom,
+    requireAdminAuth: config.requireAdminAuth,
+    adminRole: config.requireAdminAuth ? config.adminRole : null,
   });
 });
 

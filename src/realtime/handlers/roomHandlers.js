@@ -1,5 +1,6 @@
 import { isGameUnderWay } from "../../domain/gameState.js";
 import { parseLeave, parseRemoveDevice, parseRoomRequest } from "../validation.js";
+import { createRequestBinder } from "./bindRequest.js";
 
 /**
  * Rooms: creating one, joining one, leaving it, and the admin removing a guest. The deviceId the
@@ -11,36 +12,38 @@ import { parseLeave, parseRemoveDevice, parseRoomRequest } from "../validation.j
  * @param options.context - The server's services
  */
 export const registerRoomHandlers = ({ socket, on, context }) => {
-  const { rooms, notifier, logger, roomCreationAuth, failedJoins } = context;
+  const { rooms, notifier, logger, adminSessions, failedJoins } = context;
   const { deviceId, ip } = socket.data;
+  const bind = createRequestBinder({ socket, on, context });
 
   const sendError = (error) => socket.emit("channel-error", { error });
 
-  on("create-channel", async (channelId, _deviceId, options) => {
+  on("create-channel", (channelId, _deviceId, options) => {
     const request = parseRoomRequest(channelId, options);
     if (request.error) {
       sendError(request.error);
-      return;
+      return undefined;
     }
 
-    // Only an admin signed in to Supabase creates a room (when the server requires it)
-    if (roomCreationAuth) {
-      const user = await roomCreationAuth.getUser(request.accessToken);
-      if (!user) {
-        logger.warn("Room refused: no valid Supabase session", { deviceId });
-        sendError("auth_required");
+    // With sessions required, only a signed-in admin creates a room, and the room is theirs
+    return adminSessions.whenReady(socket, () => {
+      const refusal = adminSessions.getRefusal(socket);
+      if (refusal) {
+        logger.warn("Room refused: no admin session", { deviceId, reason: refusal });
+        sendError(refusal);
         return;
       }
       if (!socket.connected) return;
-    }
 
-    const result = rooms.openRoom(deviceId, request.channelId, request, socket.id);
-    if (result.error) {
-      sendError(result.error);
-      return;
-    }
-    socket.join(request.channelId);
-    notifier.sendJoinedChannel(socket, request.channelId, result.device);
+      const adminUserId = adminSessions.getUserId(socket);
+      const result = rooms.openRoom(deviceId, request.channelId, request, socket.id, adminUserId);
+      if (result.error) {
+        sendError(result.error);
+        return;
+      }
+      socket.join(request.channelId);
+      notifier.sendJoinedChannel(socket, request.channelId, result.device);
+    });
   });
 
   on("join-channel", (channelId, _deviceId, options) => {
@@ -81,8 +84,5 @@ export const registerRoomHandlers = ({ socket, on, context }) => {
     rooms.leaveChannel(deviceId, request.channelId, { isQuitting: request.isQuitting });
   });
 
-  on("remove-device", (payload) => {
-    const request = parseRemoveDevice(payload);
-    if (request) rooms.removeGuest(deviceId, request);
-  });
+  bind("remove-device", parseRemoveDevice, rooms.removeGuest, { isAdminAction: true });
 };

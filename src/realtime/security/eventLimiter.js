@@ -10,6 +10,7 @@ export const EVENT_LIMITS = Object.freeze({
   ping: { burst: 5, perSecond: 1 },
   "device-status": { burst: 10, perSecond: 5, keepLatest: true },
   "update-locale": { burst: 5, perSecond: 1, keepLatest: true },
+  "update-access-token": { burst: 5, perSecond: 0.2, keepLatest: true },
   "create-channel": { burst: 5, perSecond: 0.2 },
   "join-channel": { burst: 10, perSecond: 1 },
   "leave-channel": { burst: 10, perSecond: 2 },

@@ -7,6 +7,11 @@ const DEVELOPMENT_ORIGINS = [
 
 const LOG_LEVELS = ["debug", "info", "warn", "error", "silent"];
 
+// The role (app_metadata.role of a Supabase user) that can run games; the project's own admins
+// have it (see create_admin_user and update_user_role in its database)
+const DEFAULT_ADMIN_ROLE = "admin";
+const ADMIN_ROLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+
 // Node's timers take up to 2^31 - 1 ms: a longer timeout would fire at once
 const TIMEOUT_LIMITS = { min: 100, max: 2 ** 31 - 1 };
 
@@ -71,7 +76,7 @@ const readSupabase = (env, isRequired) => {
   if (!url || !anonKey) {
     if (isRequired) {
       throw new ConfigError(
-        "REQUIRE_AUTH_TO_CREATE_ROOM needs SUPABASE_URL and SUPABASE_ANON_KEY (the frontend's VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY)"
+        "REQUIRE_ADMIN_AUTH needs SUPABASE_URL and SUPABASE_ANON_KEY (the frontend's VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY)"
       );
     }
     return null;
@@ -98,7 +103,15 @@ export const loadConfig = (env = process.env) => {
   if (!LOG_LEVELS.includes(logLevel)) {
     throw new ConfigError(`LOG_LEVEL must be one of ${LOG_LEVELS.join(", ")}`);
   }
-  const requireAuthToCreateRoom = readBoolean(env, "REQUIRE_AUTH_TO_CREATE_ROOM", false);
+  if (env.REQUIRE_AUTH_TO_CREATE_ROOM !== undefined) {
+    // Silently ignoring it would leave the admin actions open
+    throw new ConfigError("REQUIRE_AUTH_TO_CREATE_ROOM was renamed to REQUIRE_ADMIN_AUTH");
+  }
+  const requireAdminAuth = readBoolean(env, "REQUIRE_ADMIN_AUTH", false);
+  const adminRole = env.ADMIN_ROLE?.trim() || DEFAULT_ADMIN_ROLE;
+  if (!ADMIN_ROLE_PATTERN.test(adminRole)) {
+    throw new ConfigError("ADMIN_ROLE must be a role name (letters, digits, - and _)");
+  }
   const clientIpHeader = (
     env.CLIENT_IP_HEADER?.trim() || (env.RENDER ? RENDER_CLIENT_IP_HEADER : "")
   ).toLowerCase();
@@ -117,9 +130,11 @@ export const loadConfig = (env = process.env) => {
     // Devices on frontends that keep a device token can't be impersonated; requiring it refuses
     // the frontends that don't (turn it on once every device runs the new frontend)
     requireDeviceToken: readBoolean(env, "REQUIRE_DEVICE_TOKEN", false),
-    // Only an admin signed in to Supabase can create a room (the frontend asks for a session too)
-    requireAuthToCreateRoom,
-    supabase: readSupabase(env, requireAuthToCreateRoom),
+    // Creating a room and running its game need the session of a Supabase user with the admin role
+    // (the frontend asks for a login too); the guests need none
+    requireAdminAuth,
+    adminRole,
+    supabase: readSupabase(env, requireAdminAuth),
 
     // Limits, so that no client can take the server's memory or bandwidth
     maxConnections: readInteger(env, "MAX_CONNECTIONS", 5000, { min: 1 }),

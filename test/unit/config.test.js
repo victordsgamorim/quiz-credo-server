@@ -14,7 +14,8 @@ describe("loadConfig", () => {
     ]);
     assert.equal(config.clientIpHeader, "");
     assert.equal(config.requireDeviceToken, false);
-    assert.equal(config.requireAuthToCreateRoom, false);
+    assert.equal(config.requireAdminAuth, false);
+    assert.equal(config.adminRole, "admin");
     assert.equal(config.supabase, null);
   });
 
@@ -33,12 +34,12 @@ describe("loadConfig", () => {
     );
   });
 
-  it("needs the Supabase project to require a session for new rooms", () => {
-    assert.throws(() => loadConfig({ REQUIRE_AUTH_TO_CREATE_ROOM: "true" }), ConfigError);
+  it("needs the Supabase project to require the admins' sessions", () => {
+    assert.throws(() => loadConfig({ REQUIRE_ADMIN_AUTH: "true" }), ConfigError);
     assert.throws(
       () =>
         loadConfig({
-          REQUIRE_AUTH_TO_CREATE_ROOM: "true",
+          REQUIRE_ADMIN_AUTH: "true",
           SUPABASE_URL: "http://project.supabase.co",
           SUPABASE_ANON_KEY: "key",
         }),
@@ -46,11 +47,17 @@ describe("loadConfig", () => {
       "only over HTTPS"
     );
     const { supabase } = loadConfig({
-      REQUIRE_AUTH_TO_CREATE_ROOM: "true",
+      REQUIRE_ADMIN_AUTH: "true",
       SUPABASE_URL: "https://project.supabase.co/",
       SUPABASE_ANON_KEY: "key",
     });
     assert.deepEqual(supabase, { url: "https://project.supabase.co", anonKey: "key" });
+  });
+
+  it("takes the role of the admins, and refuses the option's old name", () => {
+    assert.equal(loadConfig({ ADMIN_ROLE: " host " }).adminRole, "host");
+    assert.throws(() => loadConfig({ ADMIN_ROLE: "ad min" }), ConfigError);
+    assert.throws(() => loadConfig({ REQUIRE_AUTH_TO_CREATE_ROOM: "false" }), /REQUIRE_ADMIN_AUTH/);
   });
 
   it("refuses invalid values", () => {
