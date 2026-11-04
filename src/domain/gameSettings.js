@@ -1,4 +1,9 @@
-import { isValidPowerUpSettings, POWER_UP_KINDS, POWER_UP_SETTINGS_LIMITS } from "./powerUps.js";
+import {
+  isValidPowerUpSettings,
+  POWER_UP_KINDS,
+  POWER_UP_SETTINGS_LIMITS,
+  withNewerPowerUps,
+} from "./powerUps.js";
 import { STREAK_THRESHOLD_LIMITS } from "./scoring.js";
 
 // The admin's game settings (the settings dialog): same fields and limits as
@@ -42,8 +47,12 @@ export const getGameSettingsError = (settings) => {
     }
   }
 
-  // Optional: frontends from before the power-ups dialog don't send it
-  if (settings.powerUps !== undefined && !isValidPowerUpSettings(settings.powerUps)) {
+  // Optional: frontends from before the power-ups dialog don't send it, and the ones from before a
+  // power-up send it without that power-up
+  if (
+    settings.powerUps !== undefined &&
+    !isValidPowerUpSettings(withNewerPowerUps(settings.powerUps))
+  ) {
     return "powerUps";
   }
 
@@ -68,11 +77,19 @@ export const isValidGameSettings = (settings) => getGameSettingsError(settings) 
 export const getUnknownSettings = (settings) =>
   Object.keys(settings).filter((key) => !KNOWN_SETTINGS.includes(key));
 
-const pickPowerUpSettings = (powerUps) => ({
-  isEnabled: powerUps.isEnabled,
-  ...Object.fromEntries(Object.keys(POWER_UP_SETTINGS_LIMITS).map((key) => [key, powerUps[key]])),
-  enabled: Object.fromEntries(Object.keys(POWER_UP_KINDS).map((id) => [id, powerUps.enabled[id]])),
-});
+// Every power-up's settings, the ones a frontend from before a power-up didn't send too
+const pickPowerUpSettings = (settings) => {
+  const powerUps = withNewerPowerUps(settings);
+  return {
+    isEnabled: powerUps.isEnabled,
+    ...Object.fromEntries(
+      Object.keys(POWER_UP_SETTINGS_LIMITS).map((key) => [key, powerUps[key]])
+    ),
+    enabled: Object.fromEntries(
+      Object.keys(POWER_UP_KINDS).map((id) => [id, powerUps.enabled[id]])
+    ),
+  };
+};
 
 /**
  * Valid game settings with only the fields the frontend has: the room sends them to every device,

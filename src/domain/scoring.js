@@ -1,6 +1,7 @@
 import {
   BONUS_POWER_UP,
   BREAK_POWER_UP,
+  CUT_POWER_UP,
   FREEZE_POWER_UP,
   STEAL_POWER_UP,
   getPowerUpSettings,
@@ -14,20 +15,37 @@ export const STREAK_THRESHOLD_LIMITS = { min: 1, max: 10 };
 const MAX_STREAK_MULTIPLIER = 3;
 const STREAK_MULTIPLIER_STEP = 0.5;
 
+// The answers Cut hit: each device's question that another player used Cut on, unless the device's
+// shield blocked it. Several Cuts on one question cut its answer once
+const getCutAnswers = (powerUps) =>
+  new Set(
+    (powerUps || [])
+      .filter((use) => use.powerUpId === CUT_POWER_UP && !isAttackBlocked(powerUps, use))
+      .map((use) => `${use.targetDeviceId}:${use.questionIndex}`)
+  );
+
+// The points Cut leaves of a right answer: the game's cutPercent of them, rounded like the frontend
+// does (src/lib/scoring.ts)
+const cutPoints = (points, cutPercent) => Math.round((points * cutPercent) / 100);
+
 // Every device's points so far, replaying the game's answers, bonuses and steals in the order they
-// happened (a steal can take points a bonus gave). A steal takes the game's stealPoints, or all the
-// target has when that's less, so nobody goes below zero; a steal the target's shield blocks takes
-// nothing. Replaying the whole game keeps it right when a later shield undoes a steal: the steals
-// after it are worked out again. It also tells when each device's points last changed: on equal
-// points, the ranking keeps the one who got there first ahead.
+// happened (a steal can take points a bonus gave). A right answer Cut hit earns the game's
+// cutPercent of its points, whether Cut came before or after it. A steal takes the game's
+// stealPoints, or all the target has when that's less, so nobody goes below zero; a steal the
+// target's shield blocks takes nothing. Replaying the whole game keeps it right when a later shield
+// undoes a steal: the steals after it are worked out again. It also tells when each device's points
+// last changed: on equal points, the ranking keeps the one who got there first ahead.
 export const replayScores = (channel) => {
   const { gameState } = channel;
-  const { stealPoints, bonusPoints } = getPowerUpSettings(channel);
+  const { stealPoints, bonusPoints, cutPercent } = getPowerUpSettings(channel);
+  const cutAnswers = getCutAnswers(gameState.powerUps);
   const events = [];
   gameState.answers.forEach((answers, deviceId) => {
-    answers.forEach((answer) =>
-      events.push({ timestamp: answer.timestamp, deviceId, points: answer.points })
-    );
+    answers.forEach((answer) => {
+      const isCut = cutAnswers.has(`${deviceId}:${answer.questionIndex}`);
+      const points = isCut ? cutPoints(answer.points, cutPercent) : answer.points;
+      events.push({ timestamp: answer.timestamp, deviceId, points });
+    });
   });
   (gameState.powerUps || []).forEach((use) => {
     if (use.powerUpId === STEAL_POWER_UP) {

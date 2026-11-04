@@ -11,35 +11,62 @@ export const POWER_UP_KINDS = {
   shield: "boost",
   break: "attack",
   bonus: "boost",
+  cut: "attack",
 };
 export const SHIELD_POWER_UP = "shield";
 export const STEAL_POWER_UP = "steal";
 export const FREEZE_POWER_UP = "freeze";
 export const BREAK_POWER_UP = "break";
 export const BONUS_POWER_UP = "bonus";
+export const CUT_POWER_UP = "cut";
 
 // The admin's power-up settings (the power-ups dialog), inside the game settings: same defaults
 // and limits as src/types/powerUpSettings.ts in the frontend, keep both in sync.
 // - isEnabled: whether the game has power-ups at all; off, nobody gets any and none can be used
-// - handSize: power-ups each player gets for a game, picked at random among the enabled ones
+// - handSize: power-ups each player gets for a game, picked at random among the enabled ones (up
+//   to all of them)
 // - enabled: which power-ups can be dealt
 // - freezeQuestions: Freeze keeps the streak through wrong answers on the question it's used on
 //   and the next ones, this many in all
 // - stealPoints: Steal takes up to this many points from its target, never taking them below zero
 // - bonusPoints: Bonus adds this many points to the player who uses it, whatever their answer
+// - cutPercent: Cut leaves its target this percent of the points of their right answer to the
+//   question it's used on
 export const DEFAULT_POWER_UP_SETTINGS = {
   isEnabled: true,
   handSize: 3,
-  enabled: { freeze: true, steal: true, shield: true, break: true, bonus: true },
+  enabled: { freeze: true, steal: true, shield: true, break: true, bonus: true, cut: true },
   freezeQuestions: 2,
   stealPoints: 30,
   bonusPoints: 60,
+  cutPercent: 50,
 };
 export const POWER_UP_SETTINGS_LIMITS = {
-  handSize: { min: 1, max: 5 },
+  handSize: { min: 1, max: 6 },
   freezeQuestions: { min: 1, max: 5 },
   stealPoints: { min: 10, max: 100 },
   bonusPoints: { min: 10, max: 200 },
+  cutPercent: { min: 10, max: 90 },
+};
+
+// The power-ups added after the power-ups dialog, and their settings: a frontend from before one of
+// them sends settings without it. That frontend can't show the power-up, so it's off in its rooms
+// (never dealt to its devices), and its settings get the defaults
+const NEWER_POWER_UPS = { cut: ["cutPercent"] };
+
+export const withNewerPowerUps = (settings) => {
+  if (!settings || typeof settings !== "object") return settings;
+  const { enabled } = settings;
+  if (!enabled || typeof enabled !== "object") return settings;
+
+  const filled = { ...settings, enabled: { ...enabled } };
+  Object.entries(NEWER_POWER_UPS).forEach(([id, keys]) => {
+    if (filled.enabled[id] === undefined) filled.enabled[id] = false;
+    keys.forEach((key) => {
+      if (filled[key] === undefined) filled[key] = DEFAULT_POWER_UP_SETTINGS[key];
+    });
+  });
+  return filled;
 };
 
 export const isAttack = (powerUpId) => POWER_UP_KINDS[powerUpId] === "attack";

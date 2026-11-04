@@ -23,6 +23,23 @@ describe("game settings", () => {
     assert.deepEqual(pickGameSettings(older), older);
   });
 
+  it("are valid from frontends before Cut, with Cut off: their devices can't show it", () => {
+    const { powerUps } = gameSettings();
+    const {
+      cutPercent,
+      enabled: { cut, ...enabled },
+      ...beforeCut
+    } = powerUps;
+    void [cutPercent, cut];
+    const settings = gameSettings({ powerUps: { ...beforeCut, enabled } });
+    assert.equal(isValidGameSettings(settings), true);
+    assert.deepEqual(pickGameSettings(settings).powerUps, {
+      ...powerUps,
+      enabled: { ...powerUps.enabled, cut: false },
+      cutPercent: 50,
+    });
+  });
+
   it("are invalid out of their limits, or of another type", () => {
     const invalid = [
       null,
@@ -35,6 +52,9 @@ describe("game settings", () => {
       gameSettings({ enableDebugMode: "yes" }),
       gameSettings({ enableQuestionCache: 1 }),
       gameSettings({ powerUps: { ...gameSettings().powerUps, stealPoints: 1000 } }),
+      gameSettings({ powerUps: { ...gameSettings().powerUps, handSize: 7 } }),
+      gameSettings({ powerUps: { ...gameSettings().powerUps, cutPercent: 95 } }),
+      gameSettings({ powerUps: { ...gameSettings().powerUps, cutPercent: 55.5 } }),
     ];
     invalid.forEach((settings) => assert.equal(isValidGameSettings(settings), false));
   });
