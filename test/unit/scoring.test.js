@@ -14,18 +14,28 @@ const createChannel = (settings = gameSettings()) => ({
 });
 
 let clock = 0;
+const answer = (channel, deviceId, questionIndex, answerIndex) => {
+  const scored = scoreAnswer(channel, deviceId, { questionIndex, answerIndex, timeSpent: 1 });
+  scored.timestamp = ++clock;
+  channel.gameState.answers.set(deviceId, [
+    ...(channel.gameState.answers.get(deviceId) || []),
+    scored,
+  ]);
+};
 const answerAll = (channel, deviceId, answers) =>
-  answers.forEach((answerIndex, questionIndex) => {
-    const answer = scoreAnswer(channel, deviceId, { questionIndex, answerIndex, timeSpent: 1 });
-    answer.timestamp = ++clock;
-    channel.gameState.answers.set(deviceId, [
-      ...(channel.gameState.answers.get(deviceId) || []),
-      answer,
-    ]);
-  });
+  answers.forEach((answerIndex, questionIndex) =>
+    answer(channel, deviceId, questionIndex, answerIndex)
+  );
 
 const usePowerUp = (channel, use) =>
   channel.gameState.powerUps.push({ targetDeviceId: null, ...use, timestamp: ++clock });
+
+const cut = (deviceId, targetDeviceId, questionIndex) => ({
+  deviceId,
+  powerUpId: "cut",
+  questionIndex,
+  targetDeviceId,
+});
 
 describe("scoring", () => {
   it("multiplies a streak's points from the threshold, up to x3", () => {
@@ -87,6 +97,45 @@ describe("scoring", () => {
       device_bia: 0,
       device_ana: 0,
     });
+  });
+
+  it("leaves a right answer Cut hit with the game's cutPercent of its points, before or after it", () => {
+    const channel = createChannel();
+    answer(channel, "device_ana", 0, 0);
+    answer(channel, "device_bia", 0, 0);
+    // Before Bia's answer: her 20 points become 10
+    usePowerUp(channel, cut("device_ana", "device_bia", 1));
+    answer(channel, "device_ana", 1, 1);
+    answer(channel, "device_bia", 1, 1);
+    // After Ana's answer: her 45 points (x1.5) become 23 (22.5, rounded)
+    answer(channel, "device_ana", 2, 2);
+    usePowerUp(channel, cut("device_bia", "device_ana", 2));
+    answer(channel, "device_bia", 2, 2);
+
+    assert.deepEqual(Object.fromEntries(replayScores(channel).scores), {
+      device_ana: 53,
+      device_bia: 65,
+    });
+    // Cut takes points, not the streak: Bia's x1.5 stays
+    assert.equal(channel.gameState.answers.get("device_bia")[2].multiplier, 1.5);
+  });
+
+  it("cuts an answer once however many use Cut on it, and never through the target's shield", () => {
+    const cutTwice = (channel) => {
+      channel.devices.add("device_caio");
+      usePowerUp(channel, cut("device_ana", "device_bia", 0));
+      usePowerUp(channel, cut("device_caio", "device_bia", 0));
+    };
+    const hit = createChannel();
+    cutTwice(hit);
+    answer(hit, "device_bia", 0, 0);
+    assert.equal(replayScores(hit).scores.get("device_bia"), 5);
+
+    const shielded = createChannel();
+    cutTwice(shielded);
+    usePowerUp(shielded, { deviceId: "device_bia", powerUpId: "shield", questionIndex: 0 });
+    answer(shielded, "device_bia", 0, 0);
+    assert.equal(replayScores(shielded).scores.get("device_bia"), 10);
   });
 
   it("ranks the players, the one who got there first ahead on equal points", () => {

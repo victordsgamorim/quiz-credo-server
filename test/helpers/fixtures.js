@@ -1,6 +1,6 @@
 import { connect, markAll } from "./client.js";
 
-export const POWER_UP_IDS = ["bonus", "break", "freeze", "shield", "steal"];
+export const POWER_UP_IDS = ["bonus", "break", "cut", "freeze", "shield", "steal"];
 
 // Game settings as the frontend's settings dialogs send them. Every power-up is enabled and each
 // player gets all of them, so the tests know every hand
@@ -16,11 +16,12 @@ export const gameSettings = (overrides = {}) => ({
   enableDebugMode: false,
   powerUps: {
     isEnabled: true,
-    handSize: 5,
-    enabled: { freeze: true, steal: true, shield: true, break: true, bonus: true },
+    handSize: 6,
+    enabled: { freeze: true, steal: true, shield: true, break: true, bonus: true, cut: true },
     freezeQuestions: 2,
     stealPoints: 20,
     bonusPoints: 60,
+    cutPercent: 50,
   },
   ...overrides,
 });

@@ -561,6 +561,83 @@ describe("a room's game", () => {
   });
 });
 
+describe("the Cut power-up", () => {
+  let server;
+  let room;
+
+  before(async () => {
+    server = await startServer();
+    room = await openRoom(server);
+    await startGame(room);
+  });
+  after(async () => {
+    closeAll(room.admin, ...room.guests);
+    await server.stop();
+  });
+
+  it("leaves its target the game's cutPercent of their right answer's points", async () => {
+    const { admin } = room;
+    const [ana, bia] = room.guests;
+    markAll(admin, ana, bia);
+    ana.emit("use-power-up", {
+      channelId: ROOM_ID,
+      powerUpId: "cut",
+      targetDeviceId: "device_bia",
+    });
+    const outcome = {
+      questionIndex: 0,
+      powerUpId: "cut",
+      attacker: { id: "device_ana", name: "Ana" },
+      target: { id: "device_bia", name: "Bia" },
+      isBlocked: false,
+    };
+    assert.deepEqual(await ana.waitFor("power-up-outcome"), outcome);
+    assert.deepEqual(await bia.waitFor("power-up-outcome"), outcome);
+
+    for (const guest of [bia, ana]) {
+      guest.emit("submit-answer", {
+        channelId: ROOM_ID,
+        questionIndex: 0,
+        answerIndex: 0,
+        timeSpent: 2,
+      });
+    }
+    await admin.waitFor(
+      "ranking-update",
+      (update) => rankingOf(update) === "device_ana:10 device_bia:5"
+    );
+  });
+
+  it("cuts nothing through the target's shield, even when it came after Cut", async () => {
+    const { admin } = room;
+    const [ana, bia] = room.guests;
+    markAll(admin);
+    admin.emit("next-question", { channelId: ROOM_ID });
+    await admin.waitFor("channel-update", (state) => state.gameState.currentQuestionIndex === 1);
+
+    markAll(admin, ana, bia);
+    bia.emit("use-power-up", {
+      channelId: ROOM_ID,
+      powerUpId: "cut",
+      targetDeviceId: "device_ana",
+    });
+    await ana.waitFor("power-up-outcome", (outcome) => !outcome.isBlocked);
+    ana.emit("use-power-up", { channelId: ROOM_ID, powerUpId: "shield" });
+    await bia.waitFor("power-up-outcome", (outcome) => outcome.isBlocked);
+
+    ana.emit("submit-answer", {
+      channelId: ROOM_ID,
+      questionIndex: 1,
+      answerIndex: 1,
+      timeSpent: 2,
+    });
+    await admin.waitFor(
+      "ranking-update",
+      (update) => rankingOf(update) === "device_ana:30 device_bia:5"
+    );
+  });
+});
+
 describe("players leaving a game", () => {
   let server;
   let room;
